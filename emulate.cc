@@ -1,0 +1,742 @@
+#define _POSIX_C_SOURCE 200809L
+#include "emulate.h"
+#if defined(__unix__) || (defined(__APPLE__) && defined(__MACH__))
+#  include <sys/mman.h>
+#  include <fcntl.h>
+#  include <sys/stat.h>
+#  include <unistd.h>
+#endif
+#include <getopt.h>
+#include <fstream>
+#include <iostream>
+#include <thread>
+#include <atomic>
+#include <charconv>
+#include <system_error>
+#include <optional>
+#include <variant>
+#include <array>
+#include <string_view>
+#include <vector>
+#include <algorithm>
+#include <functional>
+#include <memory>
+#include <utility>
+#include <type_traits>
+#include <bit>
+#include <cstdlib>
+#include <cstring>
+#include <cstdio>
+#include <cctype>
+#include <cassert>
+#include <cstdint>
+#include <cstddef>
+
+using namespace std::literals::string_view_literals;
+
+class device {
+  uint32_t base;
+  uint32_t lim;
+
+public:
+  device(uint32_t base, uint32_t lim);
+  device(const device&) = delete;
+  device(device&&) = delete;
+
+protected:
+  ~device() {}
+
+public:
+  device& operator=(const device&) = delete;
+  device& operator=(device&&) = delete;
+
+  uint32_t get_base() { return base; }
+  uint32_t get_limit() { return lim; }
+
+private:
+  virtual uint8_t get_byte_impl(uint32_t) { return 0; }
+  virtual void set_byte_impl(uint32_t, uint8_t) {}
+
+public:
+  uint8_t get_byte(uint32_t off) {
+    if(off > lim) return 0;
+    return get_byte_impl(off);
+  }
+
+  void set_byte(uint32_t off, uint8_t byte) {
+    if(off > lim) return;
+    set_byte_impl(off, byte);
+  }
+
+protected:
+  virtual uint32_t get_word_impl(uint32_t off) {
+    uint32_t res = 0;
+    res |= get_byte(off);
+    res |= get_byte(off + 1) << 8;
+    res |= get_byte(off + 2) << 16;
+    res |= get_byte(off + 3) << 24;
+    return res;
+  }
+
+  virtual void set_word_impl(uint32_t off, uint32_t word) {
+    set_byte(off, word & 0xFF);
+    set_byte(off + 1, word >> 8 & 0xFF);
+    set_byte(off + 2, word >> 16 & 0xFF);
+    set_byte(off + 3, word >> 24 & 0xFF);
+  }
+
+private:
+  uint32_t clean_word(uint32_t off, uint32_t word) {
+    if(off > lim && off <= (uint32_t)-4) return 0;
+    if(lim - off < 3) word &= (uint32_t)0xFFFFFFFF >> (3 - (lim - off))*8;
+    if(off > (uint32_t)-4) word &= (uint32_t)0xFFFFFFFF << (-off)*8;
+    return word;
+  }
+
+public:
+  uint32_t get_word(uint32_t off) {
+    return clean_word(off, get_word_impl(off));
+  }
+
+  void set_word(uint32_t off, uint32_t word) {
+    set_word_impl(off, clean_word(off, word));
+  }
+};
+
+template<typename Entry> using NLE =
+  std::variant<device*, std::unique_ptr<std::array<Entry, 1024>>>;
+using L2E = NLE<device*>;
+using L3E = NLE<L2E>;
+
+template<typename T> struct shift;
+
+template<> struct shift<std::array<device*, 1024>> {
+  static constexpr int value = 2;
+};
+
+template<typename Entry> struct shift<std::array<NLE<Entry>, 1024>> {
+  static constexpr int value = shift<std::array<Entry, 1024>>::value + 10;
+};
+
+static std::array<L3E, 1024> devtab;
+
+template<typename Entry>
+static void set_devent(NLE<Entry>&, uint32_t, uint32_t, device*);
+
+static void set_devtab(std::array<device*, 1024>& tab, uint32_t base,
+		       uint32_t lim, device * dev) {
+  const uint32_t si = base >> 2;
+  const uint32_t li = lim >> 2;
+  for(long long i = 0; i <= li - si; i++)
+    tab[si + i] = dev;
+}
+
+template<typename Entry>
+static void set_devtab(std::array<NLE<Entry>, 1024>& tab, uint32_t base,
+		       uint32_t lim, device * dev) {
+  const int cs = shift<std::remove_cvref_t<decltype(tab)>>::value;
+  const uint32_t mask = ((uint32_t)1 << cs) - 1;
+  const uint32_t si = base >> cs;
+  const uint32_t li = lim >> cs;
+  const uint32_t os = base & mask;
+  const uint32_t ol = lim & mask;
+  const bool zero = si == li && os <= ol;
+  if(!zero)
+    for(long long i = os != 0; i < (long long)li - si + (ol == mask); i++)
+      tab[si + i] = dev;
+  if(os != 0) set_devent(tab[si], os, zero ? ol : mask, dev);
+  if(ol != mask && (os == 0 || !zero)) set_devent(tab[li], 0, ol, dev);
+}
+
+template<typename Entry> static void set_devent(NLE<Entry>& ent, uint32_t base,
+						uint32_t lim, device * dev) {
+  const auto ptr = std::visit([&](const auto& val) {
+    if constexpr(std::is_same_v<decltype(val), device* const&>) {
+      auto ptr = std::make_unique<std::array<Entry, 1024>>();
+      std::fill(ptr->begin(), ptr->end(), val);
+      const auto res = ptr.get();
+      ent = std::move(ptr);
+      return res;
+    }
+    else return val.get();
+  }, ent);
+  set_devtab(*ptr, base, lim, dev);
+}
+
+device::device(uint32_t base, uint32_t lim) : base{base}, lim{lim} {
+  set_devtab(devtab, base, base + lim, this);
+}
+
+#define MEMORY_GET(fn)						\
+  uint32_t get_word_impl(uint32_t off) final override {		\
+    if((off & 3) == 0) return fn(contents[off >> 2]);		\
+    const int bits = (off & 3)*8;				\
+    const uint32_t mask = (uint32_t{1} << bits) - 1;		\
+    const int shift = 32 - bits;				\
+    return (contents[(off >> 2) + 1] & mask) << shift |		\
+      (contents[(off >> 2)] & ~mask) >> bits;			\
+  }								\
+  uint8_t get_byte_impl(uint32_t off) final override {		\
+    return fn(contents[off >> 2]) >> (off & 3)*8 & 0xFF;	\
+  }
+
+#define IDENTITY(x) x
+
+class memory : public device {
+  uint32_t * contents;
+
+public:
+  memory(uint32_t base, uint32_t lim)
+    : device{base, lim} {
+    if(lim >= UINT32_MAX - 3 && UINT32_MAX == SIZE_MAX)
+      throw std::bad_alloc();
+    const size_t size = (static_cast<size_t>(lim) + 4) >> 2;
+    contents = new uint32_t[size];
+    std::fill(contents, contents + size, 0);
+  }
+
+private:
+  MEMORY_GET(IDENTITY);
+
+  void set_word_impl(uint32_t off, uint32_t word) final override {
+    if((off & 3) == 0) contents[off >> 2] = word;
+    else {
+      const int bits = (off & 3)*8;
+      const uint32_t mask = (uint32_t{1} << bits) - 1;
+      const int shift = 32 - bits;
+      contents[(off >> 2) + 1] &= ~mask;
+      contents[(off >> 2) + 1] |= word >> shift;
+      contents[(off >> 2)] &= mask;
+      contents[(off >> 2)] |= word << bits;
+    }
+  }
+
+  void set_byte_impl(uint32_t off, uint8_t byte) final override {
+    uint32_t word = contents[off >> 2];
+    word &= ~(0xFF << (off & 3)*8);
+    word |= uint32_t{byte} << (off & 3)*8;
+    contents[off >> 2] = word;
+  }
+};
+
+[[gnu::always_inline]]
+static inline uint32_t htotw(uint32_t word) {
+  if constexpr(std::endian::native == std::endian::big) {
+#ifdef __GNUC__
+    word = __builtin_bswap32(word);
+#else
+    const uint32_t orig = word;
+    word = 0;
+    word |= orig >> 24;
+    word |= orig >> 8 & 0xFF00;
+    word |= orig << 8 & 0xFF0000;
+    word |= orig << 24 & 0xFF000000;
+#endif
+  }
+  return word;
+}
+
+class ROM : public device {
+#ifdef _POSIX_VERSION
+  uint32_t * contents;
+  int fd;
+#else
+  std::ifstream in;
+#endif
+
+#ifndef _POSIX_VERSION
+  ROM(std::ifstream in, uint32_t base) : device{base, [&]() {
+    in.seekg(0, std::ios_base::end);
+    return static_cast<uint32_t>(in.tellg()) - 1;
+  }()}, in{std::move(in)} {
+    in.exceptions(std::ios_base::badbit | std::ios_base::failbit
+		  | std::ios_base::eofbit);
+  }
+#endif
+
+public:
+  ROM(const char * name, uint32_t base)
+#ifdef _POSIX_VERSION
+    : device{base, [&]() {
+      contents = NULL;
+      if((fd = open(name, O_RDONLY)) == -1) {
+	std::cerr << "cannot open " << name << " for reading: ";
+	std::perror("");
+	std::exit(-3);
+      }
+      struct stat st;
+      if(fstat(fd, &st) == -1) {
+	std::cerr << "cannot stat " << name << ": ";
+	std::perror("");
+	std::exit(-3);
+      }
+      const uint32_t limit =
+	(st.st_size >= UINT32_MAX - 4 ? UINT32_MAX - 4 : st.st_size) - 1;
+      const auto ptr = mmap(NULL, limit + 1, PROT_READ, MAP_PRIVATE, fd, 0);
+      if((contents = static_cast<uint32_t*>(ptr)) == MAP_FAILED) {
+	std::cerr << "cannot map " << name << ": ";
+	std::perror("");
+	std::exit(-3);
+      }
+      return limit;
+    }()}
+#else
+    : ROM{std::ifstream{name, std::ios_base::in | std::ios_base::binary}, base}
+#endif
+  {}
+
+private:
+#ifdef _POSIX_VERSION
+  MEMORY_GET(htotw)
+#else
+  uint8_t get_byte_impl(uint32_t off) final override {
+    try {
+      in.seekg(off, std::ios_base::beg);
+      return in.get();
+    } catch(const std::ios_base::failure&) {
+      in.clear();
+      return -1;
+    }
+  }
+#endif
+};
+
+class stdio : public device {
+  std::atomic_bool output_finished;
+  std::atomic_bool input_ready;
+  uint8_t input;
+  uint8_t output;
+
+  void reader() {
+    while(true) {
+      input = std::cin.get();
+      input_ready.wait(input_ready = true);
+    }
+  }
+
+  void writer() {
+    while(true) {
+      output_finished.wait(true);
+      std::cout.put(output);
+      output_finished = true;
+    }
+  }
+
+public:
+  stdio(uint32_t base)
+    : device{base, 7}, output_finished{true}, input_ready{false} {
+    new std::thread(&stdio::reader, this);
+    new std::thread(&stdio::writer, this);
+  }
+
+private:
+  uint8_t iget_byte(uint32_t off, bool input_ready) {
+    switch(off) {
+    case 0:
+      return input_ready ? input : 0;
+    case 1:
+      return input_ready ? (uint8_t)std::cin.eof() << 1 | 1 : 0;
+    case 4:
+      return output_finished;
+    default:
+      return 0;
+    }
+  }
+
+  uint8_t get_byte_impl(uint32_t off) final override {
+    return iget_byte(off, input_ready);
+  }
+
+  void set_byte_impl(uint32_t off, uint8_t byte) final override {
+    if(off == 4 && output_finished) {
+      output = byte;
+      output_finished = false;
+      output_finished.notify_one();
+    }
+  }
+
+  uint32_t get_word_impl(uint32_t off) final override {
+    uint32_t res = 0;
+    bool input_ready = this->input_ready;
+    res |= iget_byte(off, input_ready);
+    res |= iget_byte(off + 1, input_ready) << 8;
+    res |= iget_byte(off + 2, input_ready) << 16;
+    res |= iget_byte(off + 3, input_ready) << 24;
+    if((off >= (uint32_t)-3 || off == 0) && input_ready) {
+      this->input_ready = false;
+      this->input_ready.notify_one();
+    }
+    return res;
+  }
+};
+
+static device * get_device(uint32_t addr) {
+  return std::visit([&](const auto& val3) {
+    if constexpr(std::is_same_v<decltype(val3), device* const&>)
+      return val3;
+    else return std::visit([&](const auto& val2) {
+      if constexpr(std::is_same_v<decltype(val2), device* const&>)
+	return val2;
+      else return (*val2)[(addr >> 2) & 0x3FF];
+    }, (*val3)[(addr >> 12) & 0x3FF]);
+  }, devtab[addr >> 22]);
+}
+
+static inline uint8_t get_byte(uint32_t addr) {
+  device * const dev = get_device(addr);
+  return dev->get_byte(addr - dev->get_base());
+}
+
+[[maybe_unused]]
+static inline void set_byte(uint32_t addr, uint8_t byte) {
+  device * const dev = get_device(addr);
+  dev->set_byte(addr - dev->get_base(), byte);
+}
+
+static inline uint32_t get_word(uint32_t addr) {
+  device * const dev1 = get_device(addr);
+  uint32_t res = dev1->get_word(addr - dev1->get_base());
+  if(addr & 3) {
+    device * const dev2 = get_device(addr + 3);
+    if(dev1 != dev2)
+      res |= dev2->get_word(addr - dev2->get_base());
+  }
+  return res;
+}
+
+static inline void set_word(uint32_t addr, uint32_t word) {
+  device * const dev1 = get_device(addr);
+  dev1->set_word(addr - dev1->get_base(), word);
+  if(addr & 3) {
+    device * const dev2 = get_device(addr);
+    if(dev1 != dev2)
+      dev2->set_word(addr - dev2->get_base(), word);
+  }
+}
+
+static constexpr int command_line_length = 512;
+
+class command_line {
+  const std::array<char, command_line_length> line;
+  const std::vector<std::pair<const char*, const char*>> tokens;
+
+public:
+  class argument {
+    command_line& parent;
+    const int n;
+
+    explicit argument(command_line& parent, int n) : parent{parent}, n{n} {}
+
+  public:
+    operator std::string_view() const {
+      return std::string_view{parent.tokens[n].first, parent.tokens[n].second};
+    }
+
+    std::optional<uint32_t> parse() const {
+      char * end;
+      const uint32_t res = strtoul(parent.tokens[n].first, &end, 0);
+      if(end != parent.tokens[n].second)
+	return std::nullopt;
+      return res;
+    }
+
+    friend class command_line;
+  };
+
+  explicit command_line(std::istream& stream)
+    : line{[&]() {
+      std::array<char, command_line_length> res;
+      stream.getline(res.data(), res.size());
+      res[res.size() - 1] = 0;
+      stream.clear();
+      return res;
+    }()}, tokens{[&]() {
+      std::vector<std::pair<const char*, const char*>> res;
+      const auto line_end = std::find(line.cbegin(), line.cend(), 0);
+      auto it = line.cbegin();
+      const auto isspace = static_cast<int(*)(int)>(std::isspace);
+      while(true) {
+	it = std::find_if_not(it, line_end, isspace);
+	if(it == line_end || !*it) return res;
+	const char * const first = it;
+	it = std::find_if(it, line_end, isspace);
+	res.push_back(std::pair{first, it});
+      }
+    }()} {}
+  
+  std::optional<std::string_view> get_command() {
+    if(tokens.empty())
+      return std::nullopt;
+    return static_cast<std::string_view>(argument{*this, 0});
+  }
+
+  std::optional<argument> get_arg(int n) {
+    if(static_cast<std::size_t>(n + 1) >= tokens.size())
+      return std::nullopt;
+    return argument{*this, n + 1};
+  }
+};
+
+static void print_num(uint32_t num) {
+  std::cerr << "0x" << std::hex << num
+	    << std::dec << " (" << num << ")\n";
+}
+
+class CPU {
+  struct breakpoint {
+    int num;
+    uint32_t addr;
+  };
+
+  uint32_t regs[8] = { 0 };
+  uint32_t pc = 0;
+  bool Z = false, N = false, cmp = false;
+  std::vector<breakpoint> breakpoints;
+  int next_breakpoint = 1;
+
+public:
+  void add_breakpoint(uint32_t addr) {
+    breakpoints.push_back({ next_breakpoint++, addr });
+  }
+
+  void execute() {
+    bool single_step = false;
+    for(;; pc += 4) {
+      const uint32_t inst = get_word(pc);
+
+      for(auto it = breakpoints.cbegin(); it != breakpoints.cend();) {
+	if(pc == it->addr) {
+	  single_step = true;
+	  if(it->num == -1) {
+	    it = breakpoints.erase(it);
+	    continue;
+	  }
+	  std::cerr << "breakpoint " << it->num
+		    << " at 0x" << std::hex << it->addr << std::dec << '\n';
+	}
+	++it;
+      }
+
+      if(single_step) {
+	std::cerr << "0x" << std::hex << pc << std::dec << ": ";
+	print_inst(inst, stderr);
+	while(true) {
+	  std::cerr << "> ";
+	  command_line cmdline{std::cin};
+	  if(!cmdline.get_command()) continue;
+	  const auto mcmd = cmdline.get_command();
+	  if(!mcmd) continue;
+	  const auto& cmd = *mcmd;
+
+	  const auto get_num = [&](int n) -> std::optional<uint32_t> {
+	    const auto arg = cmdline.get_arg(n);
+	    if(!arg) {
+	      std::cerr << "not enough arguments\n";
+	      return std::nullopt;
+	    }
+	    const auto num = arg->parse();
+	    if(!num) {
+	      const std::string_view bad = *arg;
+	      std::cerr << "bad number: " << bad << '\n';
+	      return std::nullopt;
+	    }
+	    return num;
+	  };
+
+	  unsigned ri;
+	  bool byte, hword;
+	  if(cmd.size() == 2 && cmd[0] == 'r' && (ri = cmd[1] - '0') < 8)
+	    print_num(regs[ri]);
+
+	  else if((byte = cmd == "byte"sv) || (hword = cmd == "hword"sv)
+	     || cmd == "word"sv) {
+	    const auto addr = get_num(0);
+	    if(!addr) continue;
+	    if(byte) print_num(get_byte(*addr));
+	    else print_num(get_word(*addr) & (hword ? 0xFFFF : 0xFFFFFFFF));
+	  }
+
+	  else if(cmd == "b"sv || cmd == "break"sv) {
+	    const auto addr = get_num(0);
+	    if(!addr) continue;
+	    add_breakpoint(*addr);
+	  }
+
+	  else if(cmd == "d"sv || cmd == "delete"sv) {
+	    const auto num = get_num(0);
+	    if(!num) continue;
+	    for(auto it = breakpoints.cbegin(); it != breakpoints.cend();
+		++it) {
+	      if(static_cast<int>(*num) == it->num) {
+	        breakpoints.erase(it);
+		break;
+	      }
+	    }
+	  }
+
+	  else if(cmd == "s"sv || cmd == "step"sv)
+	    break;
+
+	  else if(cmd == "n"sv || cmd == "next"sv) {
+	    breakpoints.push_back({ -1, pc + 4 });
+	    single_step = false;
+	    break;
+	  }
+
+	  else if(cmd == "c"sv || cmd == "continue"sv) {
+	    single_step = false;
+	    break;
+	  }
+
+	  else std::cerr << "unknown debugger command: " << cmd << '\n';
+	}
+      }
+
+      const enum opcode opcode = inst_opcode(inst);
+      uint32_t * const rd = regs + inst_rd(inst);
+      uint32_t * const rs1 = regs + inst_rs1(inst);
+      uint32_t * const rs2 = regs + inst_rs2(inst);
+      const uint32_t imm = inst_imm(inst);
+      switch(opcode) {
+      case OP_ADD:
+	*rd = *rs1 + *rs2;
+	break;
+      case OP_SUB:
+	*rd = *rs1 - *rs2;
+	break;
+      case OP_AND:
+	*rd = *rs1 & *rs2;
+	break;
+      case OP_OR:
+	*rd = *rs1 | *rs2;
+	break;
+      case OP_XOR:
+	*rd = *rs1 ^ *rs2;
+	break;
+      case OP_NOT:
+	*rd = ~*rs1;
+	break;
+      case OP_LOAD:
+	*rd = get_word(*rs2 + imm);
+	break;
+      case OP_STORE:
+	set_word(*rs2 + imm, *rd);
+	break;
+      case OP_JUMP:
+	pc += imm;
+	break;
+      case OP_BRANCH:
+	if(!*rs2) pc += imm;
+	break;
+      case OP_CMP:
+        Z = *rs1 == *rs2;
+        N = static_cast<int32_t>(*rs1) < static_cast<int32_t>(*rs2);
+        cmp = true;
+	break;
+      case OP_BEQ:
+	if(cmp ? Z : *rs2 == 0)
+	  pc += imm;
+	break;
+      case OP_BNE:
+	if(cmp ? !Z : *rs2 != 0)
+	  pc += imm;
+	break;
+      case OP_BLT:
+	if(cmp ? N : *rs2 & 0x80000000)
+	  pc += imm;
+	break;
+      case OP_BGT:
+	if(cmp ? !N && !Z : !(*rs2 & 0x80000000))
+	  pc += imm;
+	break;
+      case OP_LOADI:
+	*rd = inst_loadi_imm(inst);
+	break;
+      case OP_CALL:
+	if(inst_rs1(inst) != 0 || inst_rs2(inst) != 0 || imm != 0)
+	  goto invalid;
+	pc = *rd - 4;
+	break;
+      case OP_LOADI16:
+	*rd &= 0xFFFF0000;
+	*rd |= imm & 0xFFFF;
+	break;
+      case OP_LOADI16H:
+	*rd &= 0xFFFF;
+	*rd |= imm << 16;
+	break;
+      default:
+      invalid:
+	fprintf(stderr, "invalid opcode\n");
+	exit(-2);
+      }
+    }
+  }
+};
+
+int main(int argc, char * const * argv) {
+  new device{0, 0xFFFFFFFF};
+  std::optional<uint32_t> stdio_base;
+  const option opts[] = {
+    { .name = "stdio", .has_arg = true, .flag = NULL, .val = 's' },
+    { .name = "memory", .has_arg = true, .flag = NULL, .val = 'm' },
+    { .name = "rom", .has_arg = true, .flag = NULL, .val = 'r' },
+    { .name = "break", .has_arg = true, .flag = NULL, .val = 'b' },
+    { .name = NULL, .has_arg = false, .flag = NULL, .val = 0 }
+  };
+  int c;
+  int longindex;
+  CPU cpu;
+  const auto bad_number = [&]() {
+    std::cerr << "bad number supplied to option --" << opts[longindex].name
+	      << '\n';
+    std::exit(-1);
+  };
+  const auto no_comma = [&]() {
+    std::cerr << "no comma in argument supplied to option --"
+	      << opts[longindex].name << '\n';
+    std::exit(-1);
+  };
+  const auto parse_number = [&](const char * start, const char * end) {
+    if(end - start >= 2 && start[0] == '0' && start[1] == 'x')
+      start += 2;
+    uint32_t res;
+    if(std::from_chars(start, end, res, 16).ec != std::errc{})
+      bad_number();
+    return res;
+  };
+  const auto parse_comma = [&]() {
+    const char * const comma = std::strchr(optarg, ',');
+    if(!comma) no_comma();
+    const uint32_t value = parse_number(optarg, comma);
+    return std::pair{value, comma + 1};
+  };
+  while((c = getopt_long(argc, argv, "s:m:r:b:", opts, &longindex)) != -1) {
+    switch(c) {
+    case 's':
+      stdio_base = parse_number(optarg, optarg + strlen(optarg));
+      break;
+    case 'm':
+      { const auto [base, end] = parse_comma();
+	const uint32_t lim = parse_number(end, end + strlen(end));
+	new memory(base, lim);
+      }
+      break;
+    case 'r':
+      { const auto [value, path] = parse_comma();
+	new ROM(path, value);
+      }
+      break;
+    case 'b':
+      cpu.add_breakpoint(parse_number(optarg, optarg + strlen(optarg)));
+      break;
+    case '?':
+      return -1;
+    default:
+      assert(false);
+      return -1;
+    }
+  }
+  if(stdio_base) new stdio(*stdio_base);
+  cpu.execute();
+}
