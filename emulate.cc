@@ -173,10 +173,15 @@ device::device(uint32_t base, uint32_t lim) : base{base}, lim{lim} {
     const int bits = (off & 3)*8;				\
     const uint32_t mask = (uint32_t{1} << bits) - 1;		\
     const int shift = 32 - bits;				\
-    return (contents[(off >> 2) + 1] & mask) << shift |		\
-      (contents[(off >> 2)] & ~mask) >> bits;			\
+    uint32_t res = 0;						\
+    if((off >> 2) + 1 <= get_limit() >> 2)			\
+      res = (contents[(off >> 2) + 1] & mask) << shift;		\
+    if((off >> 2) <= get_limit() >> 2)				\
+      res |= (contents[(off >> 2)] & ~mask) >> bits;		\
+    return res;							\
   }								\
   uint8_t get_byte_impl(uint32_t off) final override {		\
+    if(off > get_limit()) return 0;				\
     return fn(contents[off >> 2]) >> (off & 3)*8 & 0xFF;	\
   }
 
