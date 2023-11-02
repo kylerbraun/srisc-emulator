@@ -196,7 +196,7 @@ private:
      even if we first make sure the offset is aligned.  We therefore need
      this function to optimize out the bitshift. */
   uint32_t& get_exact_ref(uint32_t off) {
-    if constexpr(alignof(uint32_t) == 4)
+    if constexpr(sizeof(uint32_t) == 4)
       return *reinterpret_cast<uint32_t*>
 	(reinterpret_cast<char*>(contents) + off);
     else return get_aligned_ref(off);
