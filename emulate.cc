@@ -192,13 +192,16 @@ private:
     return contents[off >> 2];
   }
 
-  /* The compiler is unable to optimize out the bitshift in get_aligned_ref
-     even if we first make sure the offset is aligned.  We therefore need
-     this function to optimize out the bitshift. */
+  char * get_offset(uint32_t off) {
+    return reinterpret_cast<char*>(contents) + off;
+  }
+
+  /* GCC is unable to optimize out the bitshift in get_aligned_ref even if we
+     first make sure the offset is aligned.  We therefore need this function to
+     optimize out the bitshift. */
   uint32_t& get_exact_ref(uint32_t off) {
     if constexpr(sizeof(uint32_t) == 4)
-      return *reinterpret_cast<uint32_t*>
-	(reinterpret_cast<char*>(contents) + off);
+      return *reinterpret_cast<uint32_t*>(get_offset(off));
     else return get_aligned_ref(off);
   }
 
@@ -214,6 +217,16 @@ private:
   }
 
   uint32_t get_word_impl(uint32_t off) override {
+    /*
+    if constexpr(std::endian::native == std::endian::little &&
+		 sizeof(uint32_t) == 4 && CHAR_BIT == 8) {
+      uint32_t res;
+      /* GCC does not optimize the logic below into an unaligned access on
+	 targets that support it, so on byte-addressable little-endian targets
+	 with 8-bit bytes we use memcpy instead. */ /*
+      std::memcpy(&res, get_offset(off), sizeof(res));
+      return res;
+    } */
     if((off & 3) == 0) [[likely]] return get_exact_ref(off);
     const int bits = (off & 3)*8;
     const uint32_t mask = (uint32_t{1} << bits) - 1;
@@ -230,7 +243,13 @@ private:
   }
 
   void set_word_impl(uint32_t off, uint32_t word) override {
-    if((off & 3) == 0) [[likely]] get_exact_ref(off) = word;
+    /*
+    if constexpr(std::endian::native == std::endian::little &&
+		 sizeof(uint32_t) == 4 && CHAR_BIT == 8) {
+      //as above
+      std::memcpy(get_offset(off), &word, sizeof(word));
+    }
+    else */ if((off & 3) == 0) [[likely]] get_exact_ref(off) = word;
     else {
       const int bits = (off & 3)*8;
       const uint32_t mask = (uint32_t{1} << bits) - 1;
@@ -285,8 +304,13 @@ public:
       if(lim >= UINT32_MAX - 3 && UINT32_MAX == SIZE_MAX)
 	throw std::bad_alloc();
       const size_t size = (static_cast<size_t>(lim) + 4) >> 2;
-      uint32_t * const contents = new uint32_t[size];
-      std::fill(contents, contents + size, 0);
+      uint32_t * const contents =
+	/* On byte-addressable machines, we allocate a character array to
+	   allow unaligned access (using memcpy) without undefined behaviour.
+	   On other machines, we allocate a uint32_t array to save space. */
+	sizeof(uint32_t) == 4
+	? reinterpret_cast<uint32_t*>(new char[lim + 1]) : new uint32_t[size];
+      std::memset(contents, 0, lim + 1);
       return contents;
     }(), base, lim} {}
 };
