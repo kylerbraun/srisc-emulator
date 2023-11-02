@@ -4,6 +4,7 @@
 #  include <sys/mman.h>
 #  include <fcntl.h>
 #  include <sys/stat.h>
+#  include <termios.h>
 #  include <unistd.h>
 #endif
 #include <getopt.h>
@@ -22,6 +23,7 @@
 #include <functional>
 #include <memory>
 #include <utility>
+#include <chrono>
 #include <type_traits>
 #include <bit>
 #include <cstdlib>
@@ -33,6 +35,8 @@
 #include <cstddef>
 
 using namespace std::literals::string_view_literals;
+using std::uint8_t;
+using std::uint32_t;
 
 class device {
   uint32_t base;
@@ -54,8 +58,8 @@ public:
   uint32_t get_limit() { return lim; }
 
 private:
-  virtual uint8_t get_byte_impl(uint32_t) { return 0; }
-  virtual void set_byte_impl(uint32_t, uint8_t) {}
+  virtual uint8_t get_byte_impl(uint32_t) = 0;
+  virtual void set_byte_impl(uint32_t, uint8_t) = 0;
 
 public:
   uint8_t get_byte(uint32_t off) {
@@ -167,65 +171,85 @@ device::device(uint32_t base, uint32_t lim) : base{base}, lim{lim} {
   set_devtab(devtab, base, base + lim, this);
 }
 
-#define MEMORY_GET(fn)						\
-  uint32_t get_word_impl(uint32_t off) final override {		\
-    if((off & 3) == 0) return fn(contents[off >> 2]);		\
-    const int bits = (off & 3)*8;				\
-    const uint32_t mask = (uint32_t{1} << bits) - 1;		\
-    const int shift = 32 - bits;				\
-    uint32_t res = 0;						\
-    if((off >> 2) + 1 <= get_limit() >> 2)			\
-      res = (contents[(off >> 2) + 1] & mask) << shift;		\
-    if((off >> 2) <= get_limit() >> 2)				\
-      res |= (contents[(off >> 2)] & ~mask) >> bits;		\
-    return res;							\
-  }								\
-  uint8_t get_byte_impl(uint32_t off) final override {		\
-    if(off > get_limit()) return 0;				\
-    return fn(contents[off >> 2]) >> (off & 3)*8 & 0xFF;	\
-  }
-
-#define IDENTITY(x) x
-
-class memory : public device {
-  uint32_t * contents;
-
-public:
-  memory(uint32_t base, uint32_t lim)
-    : device{base, lim} {
-    if(lim >= UINT32_MAX - 3 && UINT32_MAX == SIZE_MAX)
-      throw std::bad_alloc();
-    const size_t size = (static_cast<size_t>(lim) + 4) >> 2;
-    contents = new uint32_t[size];
-    std::fill(contents, contents + size, 0);
-  }
+template<typename T> class read_only_device : public T {
+protected:
+  using T::T;
 
 private:
-  MEMORY_GET(IDENTITY);
+  void set_byte_impl(uint32_t, uint8_t) override {}
+  void set_word_impl(uint32_t, uint32_t) override {}
+};
 
-  void set_word_impl(uint32_t off, uint32_t word) final override {
-    if((off & 3) == 0) contents[off >> 2] = word;
+template<auto Conv> class array_device : public device {
+  uint32_t * const contents;
+
+protected:
+  array_device(uint32_t * contents, uint32_t base, uint32_t lim)
+    : device{base, lim}, contents{contents} {}
+
+private:
+  uint32_t get_aligned(uint32_t off) {
+    if(off >> 2 <= get_limit() >> 2)
+      return Conv(contents[off >> 2]);
+    else return 0;
+  }
+
+  void set_aligned(uint32_t off, uint32_t word) {
+    if(off >> 2 <= get_limit() >> 2)
+      contents[off >> 2] = Conv(word);
+  }
+
+  uint32_t get_word_impl(uint32_t off) override {
+    if((off & 3) == 0) return get_aligned(off);
+    const int bits = (off & 3)*8;
+    const uint32_t mask = (uint32_t{1} << bits) - 1;
+    const int shift = 32 - bits;
+    uint32_t res = 0;
+    res = (get_aligned(off + 4) & mask) << shift;
+    res |= (get_aligned(off) & ~mask) >> bits;
+    return res;
+  }
+
+  uint8_t get_byte_impl(uint32_t off) override {
+    if(off > get_limit()) return 0;
+    return get_aligned(off) >> (off & 3)*8 & 0xFF;
+  }
+
+  void set_word_impl(uint32_t off, uint32_t word) override {
+    if((off & 3) == 0) set_aligned(off, word);
     else {
       const int bits = (off & 3)*8;
       const uint32_t mask = (uint32_t{1} << bits) - 1;
       const int shift = 32 - bits;
-      contents[(off >> 2) + 1] &= ~mask;
-      contents[(off >> 2) + 1] |= word >> shift;
-      contents[(off >> 2)] &= mask;
-      contents[(off >> 2)] |= word << bits;
+      set_aligned(off + 4, (get_aligned(off + 4) & ~mask) | word >> shift);
+      set_aligned(off, (get_aligned(off) & mask) | word << bits);
     }
   }
 
-  void set_byte_impl(uint32_t off, uint8_t byte) final override {
-    uint32_t word = contents[off >> 2];
-    word &= ~(0xFF << (off & 3)*8);
-    word |= uint32_t{byte} << (off & 3)*8;
-    contents[off >> 2] = word;
+  void set_byte_impl(uint32_t off, uint8_t byte) override {
+    const uint32_t bstart = (off & 3)*8;
+    set_aligned(off, ((get_aligned(off) & ~(0xFF << bstart))
+		      | uint32_t{byte} << bstart));
   }
 };
 
+static uint32_t uint32_id(uint32_t n) { return n; }
+
+class memory : public array_device<uint32_id> {
+public:
+  memory(uint32_t base, uint32_t lim)
+    : array_device{[&]() {
+      if(lim >= UINT32_MAX - 3 && UINT32_MAX == SIZE_MAX)
+	throw std::bad_alloc();
+      const size_t size = (static_cast<size_t>(lim) + 4) >> 2;
+      uint32_t * const contents = new uint32_t[size];
+      std::fill(contents, contents + size, 0);
+      return contents;
+    }(), base, lim} {}
+};
+
 [[gnu::always_inline]]
-static inline uint32_t htotw(uint32_t word) {
+static inline uint32_t byteconv(uint32_t word) {
   if constexpr(std::endian::native == std::endian::big) {
 #ifdef __GNUC__
     word = __builtin_bswap32(word);
@@ -241,29 +265,16 @@ static inline uint32_t htotw(uint32_t word) {
   return word;
 }
 
-class ROM : public device {
 #ifdef _POSIX_VERSION
-  uint32_t * contents;
-  int fd;
-#else
-  std::ifstream in;
-#endif
-
-#ifndef _POSIX_VERSION
-  ROM(std::ifstream in, uint32_t base) : device{base, [&]() {
-    in.seekg(0, std::ios_base::end);
-    return static_cast<uint32_t>(in.tellg()) - 1;
-  }()}, in{std::move(in)} {
-    in.exceptions(std::ios_base::badbit | std::ios_base::failbit
-		  | std::ios_base::eofbit);
-  }
-#endif
+class mmap_device : public array_device<byteconv> {
+  mmap_device(uint32_t base, std::pair<uint32_t*, uint32_t> internal)
+    : array_device{internal.first, base, internal.second} {}
 
 public:
-  ROM(const char * name, uint32_t base)
-#ifdef _POSIX_VERSION
-    : device{base, [&]() {
-      contents = NULL;
+  mmap_device(const char * name, uint32_t base)
+    : mmap_device{base, [&]() {
+      uint32_t * contents = NULL;
+      int fd;
       if((fd = open(name, O_RDONLY)) == -1) {
 	std::cerr << "cannot open " << name << " for reading: ";
 	std::perror("");
@@ -283,18 +294,35 @@ public:
 	std::perror("");
 	std::exit(-3);
       }
-      return limit;
-    }()}
-#else
-    : ROM{std::ifstream{name, std::ios_base::in | std::ios_base::binary}, base}
+      return std::pair { contents, limit };
+    }()} {}
+};
+
+class mmap_ROM : public read_only_device<mmap_device> {
+public:
+  using read_only_device::read_only_device;
+};
 #endif
+
+class fstream_ROM : public read_only_device<device> {
+  std::ifstream in;
+
+  fstream_ROM(std::ifstream in, uint32_t base) : read_only_device{base, [&]() {
+    in.seekg(0, std::ios_base::end);
+    return static_cast<uint32_t>(in.tellg()) - 1;
+  }()}, in{std::move(in)} {
+    this->in.exceptions(std::ios_base::badbit | std::ios_base::failbit
+			| std::ios_base::eofbit);
+  }
+
+public:
+  fstream_ROM(const char * name, uint32_t base)
+    : fstream_ROM{std::ifstream{name,
+				std::ios_base::in | std::ios_base::binary},
+		  base}
   {}
 
-private:
-#ifdef _POSIX_VERSION
-  MEMORY_GET(htotw)
-#else
-  uint8_t get_byte_impl(uint32_t off) final override {
+  uint8_t get_byte_impl(uint32_t off) override {
     try {
       in.seekg(off, std::ios_base::beg);
       return in.get();
@@ -303,7 +331,6 @@ private:
       return -1;
     }
   }
-#endif
 };
 
 class stdio : public device {
@@ -330,6 +357,21 @@ class stdio : public device {
 public:
   stdio(uint32_t base)
     : device{base, 7}, output_finished{true}, input_ready{false} {
+#ifdef _POSIX_VERSION
+    if(isatty(0)) {
+      std::setbuf(stdin, NULL);
+      std::setbuf(stdout, NULL);
+      struct termios termios;
+      tcgetattr(0, &termios);
+      termios.c_iflag &= ~(PARMRK | ISTRIP | IXON);
+      termios.c_lflag &= ~(ECHO | ICANON | IEXTEN);
+      termios.c_cflag &= ~(CSIZE | PARENB);
+      termios.c_cflag |= CS8;
+      termios.c_cc[VMIN] = 1;
+      termios.c_cc[VTIME] = 0;
+      tcsetattr(0, TCSANOW, &termios);
+    }
+#endif
     new std::thread(&stdio::reader, this);
     new std::thread(&stdio::writer, this);
   }
@@ -348,11 +390,11 @@ private:
     }
   }
 
-  uint8_t get_byte_impl(uint32_t off) final override {
+  uint8_t get_byte_impl(uint32_t off) override {
     return iget_byte(off, input_ready);
   }
 
-  void set_byte_impl(uint32_t off, uint8_t byte) final override {
+  void set_byte_impl(uint32_t off, uint8_t byte) override {
     if(off == 4 && output_finished) {
       output = byte;
       output_finished = false;
@@ -360,7 +402,7 @@ private:
     }
   }
 
-  uint32_t get_word_impl(uint32_t off) final override {
+  uint32_t get_word_impl(uint32_t off) override {
     uint32_t res = 0;
     bool input_ready = this->input_ready;
     res |= iget_byte(off, input_ready);
@@ -372,6 +414,36 @@ private:
       this->input_ready.notify_one();
     }
     return res;
+  }
+};
+
+class ticks : public read_only_device<device> {
+public:
+  ticks(uint32_t base) : read_only_device{base, 3} {}
+
+private:
+  uint32_t get_word_impl(uint32_t off) override {
+    if((off & 3) == 0) {
+      return static_cast<uint32_t>
+	(std::chrono::duration_cast<std::chrono::milliseconds>
+	 (std::chrono::steady_clock::now().time_since_epoch()).count());
+    }
+    const uint32_t bits = (off & 3)*8;
+    return get_word_impl(0) << (32 - bits) | get_word_impl(0) >> bits;
+  }
+
+  uint8_t get_byte_impl(uint32_t off) override {
+    return static_cast<uint8_t>((get_word_impl(0) & (0xFF << off*8)) >> off*8);
+  }
+};
+
+class zero_device : public read_only_device<device> {
+public:
+  using read_only_device::read_only_device;
+
+private:
+  uint8_t get_byte_impl(uint32_t) override {
+    return 0;
   }
 };
 
@@ -680,13 +752,15 @@ public:
 };
 
 int main(int argc, char * const * argv) {
-  new device{0, 0xFFFFFFFF};
+  new zero_device{0, 0xFFFFFFFF};
   std::optional<uint32_t> stdio_base;
+  std::optional<uint32_t> ticks_base;
   const option opts[] = {
     { .name = "stdio", .has_arg = true, .flag = NULL, .val = 's' },
     { .name = "memory", .has_arg = true, .flag = NULL, .val = 'm' },
     { .name = "rom", .has_arg = true, .flag = NULL, .val = 'r' },
     { .name = "break", .has_arg = true, .flag = NULL, .val = 'b' },
+    { .name = "ticks", .has_arg = true, .flag = NULL, .val = 't' },
     { .name = NULL, .has_arg = false, .flag = NULL, .val = 0 }
   };
   int c;
@@ -729,8 +803,15 @@ int main(int argc, char * const * argv) {
       break;
     case 'r':
       { const auto [value, path] = parse_comma();
-	new ROM(path, value);
+#ifdef _POSIX_VERSION
+	new mmap_ROM(path, value);
+#else
+	new fstream_ROM(path, value);
+#endif
       }
+      break;
+    case 't':
+      ticks_base = parse_number(optarg, optarg + strlen(optarg));
       break;
     case 'b':
       cpu.add_breakpoint(parse_number(optarg, optarg + strlen(optarg)));
@@ -743,5 +824,6 @@ int main(int argc, char * const * argv) {
     }
   }
   if(stdio_base) new stdio(*stdio_base);
+  if(ticks_base) new ticks(*ticks_base);
   cpu.execute();
 }
