@@ -188,27 +188,33 @@ protected:
     : device{base, lim}, contents{contents} {}
 
 private:
-  uint32_t get_aligned(uint32_t off) {
-    return Conv(contents[off >> 2]);
+  uint32_t& get_aligned_ref(uint32_t off) {
+    return contents[off >> 2];
   }
 
-  void set_aligned(uint32_t off, uint32_t word) {
-    contents[off >> 2] = Conv(word);
+  /* The compiler is unable to optimize out the bitshift in get_aligned_ref
+     even if we first make sure the offset is aligned.  We therefore need
+     this function to optimize out the bitshift. */
+  uint32_t& get_exact_ref(uint32_t off) {
+    if constexpr(alignof(uint32_t) == 4)
+      return *reinterpret_cast<uint32_t*>
+	(reinterpret_cast<char*>(contents) + off);
+    else return get_aligned_ref(off);
   }
 
   uint32_t get_alignedl(uint32_t off) {
     if(off >> 2 <= get_limit() >> 2)
-      return get_aligned(off);
+      return get_aligned_ref(off);
     else return 0;
   }
 
   void set_alignedl(uint32_t off, uint32_t word) {
     if(off >> 2 <= get_limit() >> 2)
-      set_aligned(off, word);
+      get_aligned_ref(off) = word;
   }
 
   uint32_t get_word_impl(uint32_t off) override {
-    if((off & 3) == 0) return get_aligned(off);
+    if((off & 3) == 0) [[likely]] return get_exact_ref(off);
     const int bits = (off & 3)*8;
     const uint32_t mask = (uint32_t{1} << bits) - 1;
     const int shift = 32 - bits;
@@ -224,7 +230,7 @@ private:
   }
 
   void set_word_impl(uint32_t off, uint32_t word) override {
-    if((off & 3) == 0) set_aligned(off, word);
+    if((off & 3) == 0) [[likely]] get_exact_ref(off) = word;
     else {
       const int bits = (off & 3)*8;
       const uint32_t mask = (uint32_t{1} << bits) - 1;
