@@ -217,16 +217,15 @@ private:
   }
 
   uint32_t get_word_impl(uint32_t off) override {
-    /*
     if constexpr(std::endian::native == std::endian::little &&
 		 sizeof(uint32_t) == 4 && CHAR_BIT == 8) {
       uint32_t res;
       /* GCC does not optimize the logic below into an unaligned access on
 	 targets that support it, so on byte-addressable little-endian targets
-	 with 8-bit bytes we use memcpy instead. */ /*
+	 with 8-bit bytes we use memcpy instead. */
       std::memcpy(&res, get_offset(off), sizeof(res));
       return res;
-    } */
+    }
     if((off & 3) == 0) [[likely]] return get_exact_ref(off);
     const int bits = (off & 3)*8;
     const uint32_t mask = (uint32_t{1} << bits) - 1;
@@ -243,13 +242,12 @@ private:
   }
 
   void set_word_impl(uint32_t off, uint32_t word) override {
-    /*
     if constexpr(std::endian::native == std::endian::little &&
 		 sizeof(uint32_t) == 4 && CHAR_BIT == 8) {
       //as above
       std::memcpy(get_offset(off), &word, sizeof(word));
     }
-    else */ if((off & 3) == 0) [[likely]] get_exact_ref(off) = word;
+    else if((off & 3) == 0) [[likely]] get_exact_ref(off) = word;
     else {
       const int bits = (off & 3)*8;
       const uint32_t mask = (uint32_t{1} << bits) - 1;
