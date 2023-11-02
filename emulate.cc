@@ -180,11 +180,11 @@ private:
   void set_word_impl(uint32_t, uint32_t) override {}
 };
 
-template<auto Conv> class array_device : public device {
+template<auto Conv> class fn_array_device : public device {
   uint32_t * const contents;
 
 protected:
-  array_device(uint32_t * contents, uint32_t base, uint32_t lim)
+  fn_array_device(uint32_t * contents, uint32_t base, uint32_t lim)
     : device{base, lim}, contents{contents} {}
 
 private:
@@ -241,20 +241,7 @@ private:
   }
 };
 
-static uint32_t uint32_id(uint32_t n) { return n; }
-
-class memory : public array_device<uint32_id> {
-public:
-  memory(uint32_t base, uint32_t lim)
-    : array_device{[&]() {
-      if(lim >= UINT32_MAX - 3 && UINT32_MAX == SIZE_MAX)
-	throw std::bad_alloc();
-      const size_t size = (static_cast<size_t>(lim) + 4) >> 2;
-      uint32_t * const contents = new uint32_t[size];
-      std::fill(contents, contents + size, 0);
-      return contents;
-    }(), base, lim} {}
-};
+static inline uint32_t uint32_id(uint32_t n) { return n; }
 
 [[gnu::always_inline]]
 static inline uint32_t byteconv(uint32_t word) {
@@ -273,8 +260,33 @@ static inline uint32_t byteconv(uint32_t word) {
   return word;
 }
 
+template<bool> class array_device : public fn_array_device<uint32_id> {
+public:
+  using fn_array_device::fn_array_device;
+};
+
+template<> class array_device<false>
+  : public fn_array_device<std::endian::native == std::endian::big
+			   ? byteconv : uint32_id> {
+public:
+  using fn_array_device::fn_array_device;
+};
+
+class memory : public array_device<true> {
+public:
+  memory(uint32_t base, uint32_t lim)
+    : array_device{[&]() {
+      if(lim >= UINT32_MAX - 3 && UINT32_MAX == SIZE_MAX)
+	throw std::bad_alloc();
+      const size_t size = (static_cast<size_t>(lim) + 4) >> 2;
+      uint32_t * const contents = new uint32_t[size];
+      std::fill(contents, contents + size, 0);
+      return contents;
+    }(), base, lim} {}
+};
+
 #ifdef _POSIX_VERSION
-class mmap_device : public array_device<byteconv> {
+class mmap_device : public array_device<false> {
   mmap_device(uint32_t base, std::pair<uint32_t*, uint32_t> internal)
     : array_device{internal.first, base, internal.second} {}
 
