@@ -189,14 +189,22 @@ protected:
 
 private:
   uint32_t get_aligned(uint32_t off) {
-    if(off >> 2 <= get_limit() >> 2)
-      return Conv(contents[off >> 2]);
-    else return 0;
+    return Conv(contents[off >> 2]);
   }
 
   void set_aligned(uint32_t off, uint32_t word) {
+    contents[off >> 2] = Conv(word);
+  }
+
+  uint32_t get_alignedl(uint32_t off) {
     if(off >> 2 <= get_limit() >> 2)
-      contents[off >> 2] = Conv(word);
+      return get_aligned(off);
+    else return 0;
+  }
+
+  void set_alignedl(uint32_t off, uint32_t word) {
+    if(off >> 2 <= get_limit() >> 2)
+      set_aligned(off, word);
   }
 
   uint32_t get_word_impl(uint32_t off) override {
@@ -205,14 +213,14 @@ private:
     const uint32_t mask = (uint32_t{1} << bits) - 1;
     const int shift = 32 - bits;
     uint32_t res = 0;
-    res = (get_aligned(off + 4) & mask) << shift;
-    res |= (get_aligned(off) & ~mask) >> bits;
+    res = (get_alignedl(off + 4) & mask) << shift;
+    res |= (get_alignedl(off) & ~mask) >> bits;
     return res;
   }
 
   uint8_t get_byte_impl(uint32_t off) override {
     if(off > get_limit()) return 0;
-    return get_aligned(off) >> (off & 3)*8 & 0xFF;
+    return get_alignedl(off) >> (off & 3)*8 & 0xFF;
   }
 
   void set_word_impl(uint32_t off, uint32_t word) override {
@@ -221,15 +229,15 @@ private:
       const int bits = (off & 3)*8;
       const uint32_t mask = (uint32_t{1} << bits) - 1;
       const int shift = 32 - bits;
-      set_aligned(off + 4, (get_aligned(off + 4) & ~mask) | word >> shift);
-      set_aligned(off, (get_aligned(off) & mask) | word << bits);
+      set_alignedl(off + 4, (get_alignedl(off + 4) & ~mask) | word >> shift);
+      set_alignedl(off, (get_alignedl(off) & mask) | word << bits);
     }
   }
 
   void set_byte_impl(uint32_t off, uint8_t byte) override {
     const uint32_t bstart = (off & 3)*8;
-    set_aligned(off, ((get_aligned(off) & ~(0xFF << bstart))
-		      | uint32_t{byte} << bstart));
+    set_alignedl(off, ((get_alignedl(off) & ~(0xFF << bstart))
+		       | uint32_t{byte} << bstart));
   }
 };
 
