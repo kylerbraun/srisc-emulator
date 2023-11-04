@@ -24,6 +24,7 @@
 #include <memory>
 #include <utility>
 #include <chrono>
+#include <stdexcept>
 #include <type_traits>
 #include <bit>
 #include <cstdlib>
@@ -72,7 +73,7 @@ public:
     set_byte_impl(off, byte);
   }
 
-protected:
+private:
   virtual uint32_t get_word_impl(uint32_t off) {
     uint32_t res = 0;
     res |= get_byte(off);
@@ -89,7 +90,6 @@ protected:
     set_byte(off + 3, word >> 24 & 0xFF);
   }
 
-private:
   uint32_t clean_word(uint32_t off, uint32_t word) {
     if(off > lim && off <= (uint32_t)-4) return 0;
     if(lim - off < 3) word &= (uint32_t)0xFFFFFFFF >> (3 - (lim - off))*8;
@@ -171,6 +171,15 @@ device::device(uint32_t base, uint32_t lim) : base{base}, lim{lim} {
   set_devtab(devtab, base, base + lim, this);
 }
 
+static inline bool byte_in_device_range(uint32_t addr, device * dev) {
+  return addr >= dev->get_base() && addr - dev->get_base() < dev->get_limit();
+}
+
+static inline bool word_in_device_range(uint32_t addr, device * dev) {
+  return addr >= dev->get_base()
+    && addr + 3 - dev->get_base() < dev->get_limit();
+}
+
 template<typename T> class read_only_device : public T {
 protected:
   using T::T;
@@ -216,7 +225,8 @@ private:
       get_aligned_ref(off) = word;
   }
 
-  uint32_t get_word_impl(uint32_t off) override {
+public:
+  uint32_t get_word_raw(uint32_t off) {
     if constexpr(std::endian::native == std::endian::little &&
 		 sizeof(uint32_t) == 4 && CHAR_BIT == 8) {
       uint32_t res;
@@ -236,12 +246,7 @@ private:
     return res;
   }
 
-  uint8_t get_byte_impl(uint32_t off) override {
-    if(off > get_limit()) return 0;
-    return get_alignedl(off) >> (off & 3)*8 & 0xFF;
-  }
-
-  void set_word_impl(uint32_t off, uint32_t word) override {
+  void set_word_raw(uint32_t off, uint32_t word) {
     if constexpr(std::endian::native == std::endian::little &&
 		 sizeof(uint32_t) == 4 && CHAR_BIT == 8) {
       //as above
@@ -255,6 +260,20 @@ private:
       set_alignedl(off + 4, (get_alignedl(off + 4) & ~mask) | word >> shift);
       set_alignedl(off, (get_alignedl(off) & mask) | word << bits);
     }
+  }
+
+private:
+  uint32_t get_word_impl(uint32_t off) override {
+    return get_word_raw(off);
+  }
+
+  uint8_t get_byte_impl(uint32_t off) override {
+    if(off > get_limit()) return 0;
+    return get_alignedl(off) >> (off & 3)*8 & 0xFF;
+  }
+
+  void set_word_impl(uint32_t off, uint32_t word) override {
+    set_word_raw(off, word);
   }
 
   void set_byte_impl(uint32_t off, uint8_t byte) override {
@@ -295,7 +314,11 @@ public:
   using fn_array_device::fn_array_device;
 };
 
-class memory : public array_device<true> {
+class memory;
+
+static memory * largest_memory = nullptr;
+
+class memory final : public array_device<true> {
 public:
   memory(uint32_t base, uint32_t lim)
     : array_device{[&]() {
@@ -310,7 +333,12 @@ public:
 	? reinterpret_cast<uint32_t*>(new char[lim + 1]) : new uint32_t[size];
       std::memset(contents, 0, lim + 1);
       return contents;
-    }(), base, lim} {}
+    }(), base, lim} {
+    if(lim > 0xFFFFFFFB)
+      throw std::domain_error{"limit too large"};
+    if(!largest_memory || lim > largest_memory->get_limit())
+      largest_memory = this;
+  }
 };
 
 #ifdef _POSIX_VERSION
@@ -346,9 +374,16 @@ public:
     }()} {}
 };
 
-class mmap_ROM : public read_only_device<mmap_device> {
+class mmap_ROM;
+
+static mmap_ROM * largest_ROM = nullptr;
+
+class mmap_ROM final : public read_only_device<mmap_device> {
 public:
-  using read_only_device::read_only_device;
+  mmap_ROM(const char * name, uint32_t base) : read_only_device{name, base} {
+    if(!largest_ROM || get_limit() > largest_ROM->get_limit())
+      largest_ROM = this;
+  }
 };
 #endif
 
@@ -655,9 +690,32 @@ public:
   }
 
   void execute() {
+    device * const largest_readable =
+#ifdef _POSIX_VERSION
+      largest_ROM && largest_ROM->get_limit() > largest_memory->get_limit()
+      ? static_cast<device*>(largest_ROM) : static_cast<device*>(largest_memory)
+#else
+      largest_memory
+#endif
+      ;
+
     bool single_step = false;
     for(;; pc += 4) {
-      const uint32_t inst = get_word(pc);
+      const auto get = [&](uint32_t addr) {
+	if(word_in_device_range(addr, largest_readable)) {
+#ifdef _POSIX_VERSION
+	  if(largest_readable == largest_ROM)
+	    return
+	      largest_ROM->get_word_raw(addr - largest_readable->get_base());
+	  else
+#endif
+	    return
+	      largest_memory->get_word_raw(addr - largest_readable->get_base());
+	}
+	else return get_word(addr);
+      };
+
+      const uint32_t inst = get(pc);
 
       for(auto it = breakpoints.cbegin(); it != breakpoints.cend();) {
 	if(pc == it->addr) {
@@ -772,10 +830,15 @@ public:
 	*rd = ~*rs1;
 	break;
       case OP_LOAD:
-	*rd = get_word(*rs2 + imm);
+        *rd = get(*rs2 + imm);
 	break;
       case OP_STORE:
-	set_word(*rs2 + imm, *rd);
+	{ const uint32_t dest = *rs2 + imm;
+	  if(word_in_device_range(dest, largest_memory))
+	    largest_memory->set_word_raw(dest - largest_memory->get_base(),
+					 *rd);
+	  else set_word(dest, *rd);
+	}
 	break;
       case OP_JUMP:
 	pc += imm;
