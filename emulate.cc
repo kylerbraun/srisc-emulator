@@ -539,6 +539,32 @@ static inline void set_word(uint32_t addr, uint32_t word) {
   }
 }
 
+static std::size_t accept(std::span<char> buf) {
+  assert(buf.size() > 0);
+  std::size_t read = 0;
+  int c;
+  while(c = std::cin.get(), !std::cin.eof()) {
+    switch(c) {
+    case '\b':
+    case 127:
+      std::cout << "\b \b";
+      if(read > 0) read--;
+      continue;
+    case '\n':
+      std::cout << '\n';
+      goto end;
+    case '\t':
+      continue;
+    }
+    if(read + 1 >= buf.size()) continue;
+    std::cout << static_cast<char>(c);
+    buf[read++] = c;
+  }
+ end:
+  buf[read] = 0;
+  return read;
+}
+
 static constexpr int command_line_length = 512;
 
 class command_line {
@@ -571,7 +597,11 @@ public:
   explicit command_line(std::istream& stream)
     : line{[&]() {
       std::array<char, command_line_length> res;
-      stream.getline(res.data(), res.size());
+#ifdef _POSIX_VERSION
+      if(isatty(0)) accept(std::span{res.data(), res.size()});
+      else
+#endif
+	stream.getline(res.data(), res.size());
       res[res.size() - 1] = 0;
       stream.clear();
       return res;
