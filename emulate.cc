@@ -1,12 +1,10 @@
 #define _POSIX_C_SOURCE 200809L
 #include "emulate.h"
-#if defined(__unix__) || (defined(__APPLE__) && defined(__MACH__))
-#  include <sys/mman.h>
-#  include <fcntl.h>
-#  include <sys/stat.h>
-#  include <termios.h>
-#  include <unistd.h>
-#endif
+#include <sys/mman.h>
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <termios.h>
+#include <unistd.h>
 #include <getopt.h>
 #include <fstream>
 #include <iostream>
@@ -18,6 +16,7 @@
 #include <variant>
 #include <array>
 #include <string_view>
+#include <span>
 #include <vector>
 #include <algorithm>
 #include <functional>
@@ -176,7 +175,7 @@ static inline bool byte_in_device_range(uint32_t addr, device * dev) {
 }
 
 static inline bool word_in_device_range(uint32_t addr, device * dev) {
-  return addr >= dev->get_base()
+  return dev && addr >= dev->get_base()
     && addr + 3 - dev->get_base() < dev->get_limit();
 }
 
@@ -341,7 +340,6 @@ public:
   }
 };
 
-#ifdef _POSIX_VERSION
 class mmap_device : public array_device<false> {
   mmap_device(uint32_t base, std::pair<uint32_t*, uint32_t> internal)
     : array_device{internal.first, base, internal.second} {}
@@ -385,36 +383,6 @@ public:
       largest_ROM = this;
   }
 };
-#endif
-
-class fstream_ROM : public read_only_device<device> {
-  std::ifstream in;
-
-  fstream_ROM(std::ifstream in, uint32_t base) : read_only_device{base, [&]() {
-    in.seekg(0, std::ios_base::end);
-    return static_cast<uint32_t>(in.tellg()) - 1;
-  }()}, in{std::move(in)} {
-    this->in.exceptions(std::ios_base::badbit | std::ios_base::failbit
-			| std::ios_base::eofbit);
-  }
-
-public:
-  fstream_ROM(const char * name, uint32_t base)
-    : fstream_ROM{std::ifstream{name,
-				std::ios_base::in | std::ios_base::binary},
-		  base}
-  {}
-
-  uint8_t get_byte_impl(uint32_t off) override {
-    try {
-      in.seekg(off, std::ios_base::beg);
-      return in.get();
-    } catch(const std::ios_base::failure&) {
-      in.clear();
-      return -1;
-    }
-  }
-};
 
 class stdio : public device {
   std::atomic_bool output_finished;
@@ -440,7 +408,6 @@ class stdio : public device {
 public:
   stdio(uint32_t base)
     : device{base, 7}, output_finished{true}, input_ready{false} {
-#ifdef _POSIX_VERSION
     if(isatty(0)) {
       std::setbuf(stdin, NULL);
       std::setbuf(stdout, NULL);
@@ -454,7 +421,6 @@ public:
       termios.c_cc[VTIME] = 0;
       tcsetattr(0, TCSANOW, &termios);
     }
-#endif
     new std::thread(&stdio::reader, this);
     new std::thread(&stdio::writer, this);
   }
@@ -632,10 +598,8 @@ public:
   explicit command_line(std::istream& stream)
     : line{[&]() {
       std::array<char, command_line_length> res;
-#ifdef _POSIX_VERSION
       if(isatty(0)) accept(std::span{res.data(), res.size()});
       else
-#endif
 	stream.getline(res.data(), res.size());
       res[res.size() - 1] = 0;
       stream.clear();
@@ -691,24 +655,18 @@ public:
 
   void execute() {
     device * const largest_readable =
-#ifdef _POSIX_VERSION
       largest_ROM && largest_ROM->get_limit() > largest_memory->get_limit()
-      ? static_cast<device*>(largest_ROM) : static_cast<device*>(largest_memory)
-#else
-      largest_memory
-#endif
-      ;
+      ? static_cast<device*>(largest_ROM)
+      : static_cast<device*>(largest_memory);
 
     bool single_step = false;
     for(;; pc += 4) {
       const auto get = [&](uint32_t addr) {
 	if(word_in_device_range(addr, largest_readable)) {
-#ifdef _POSIX_VERSION
 	  if(largest_readable == largest_ROM)
 	    return
 	      largest_ROM->get_word_raw(addr - largest_readable->get_base());
 	  else
-#endif
 	    return
 	      largest_memory->get_word_raw(addr - largest_readable->get_base());
 	}
@@ -944,11 +902,7 @@ int main(int argc, char * const * argv) {
       break;
     case 'r':
       { const auto [value, path] = parse_comma();
-#ifdef _POSIX_VERSION
 	new mmap_ROM(path, value);
-#else
-	new fstream_ROM(path, value);
-#endif
       }
       break;
     case 't':
