@@ -655,7 +655,8 @@ public:
 
   void execute() {
     device * const largest_readable =
-      largest_ROM && largest_ROM->get_limit() > largest_memory->get_limit()
+      largest_ROM && (!largest_memory ||
+		      largest_ROM->get_limit() > largest_memory->get_limit())
       ? static_cast<device*>(largest_ROM)
       : static_cast<device*>(largest_memory);
 
