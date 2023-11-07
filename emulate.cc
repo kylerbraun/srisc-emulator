@@ -215,13 +215,13 @@ private:
 
   uint32_t get_alignedl(uint32_t off) {
     if(off >> 2 <= get_limit() >> 2)
-      return get_aligned_ref(off);
+      return Conv(get_aligned_ref(off));
     else return 0;
   }
 
   void set_alignedl(uint32_t off, uint32_t word) {
     if(off >> 2 <= get_limit() >> 2)
-      get_aligned_ref(off) = word;
+      get_aligned_ref(off) = Conv(word);
   }
 
 public:
@@ -235,7 +235,7 @@ public:
       std::memcpy(&res, get_offset(off), sizeof(res));
       return res;
     }
-    if((off & 3) == 0) [[likely]] return get_exact_ref(off);
+    if((off & 3) == 0) [[likely]] return Conv(get_exact_ref(off));
     const int bits = (off & 3)*8;
     const uint32_t mask = (uint32_t{1} << bits) - 1;
     const int shift = 32 - bits;
@@ -251,7 +251,7 @@ public:
       //as above
       std::memcpy(get_offset(off), &word, sizeof(word));
     }
-    else if((off & 3) == 0) [[likely]] get_exact_ref(off) = word;
+    else if((off & 3) == 0) [[likely]] get_exact_ref(off) = Conv(word);
     else {
       const int bits = (off & 3)*8;
       const uint32_t mask = (uint32_t{1} << bits) - 1;
