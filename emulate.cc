@@ -340,6 +340,10 @@ public:
   }
 };
 
+template<typename T> static auto make_unsigned(T val) {
+  return static_cast<std::make_unsigned_t<T>>(val);
+}
+
 class mmap_device : public array_device<false> {
   mmap_device(uint32_t base, std::pair<uint32_t*, uint32_t> internal)
     : array_device{internal.first, base, internal.second} {}
@@ -361,7 +365,8 @@ public:
 	std::exit(-3);
       }
       const uint32_t limit =
-	(st.st_size >= UINT32_MAX - 4 ? UINT32_MAX - 4 : st.st_size) - 1;
+	(make_unsigned(st.st_size) >= UINT32_MAX - 4
+	 ? UINT32_MAX - 4 : st.st_size) - 1;
       const auto ptr = mmap(NULL, limit + 1, PROT_READ, MAP_PRIVATE, fd, 0);
       if((contents = static_cast<uint32_t*>(ptr)) == MAP_FAILED) {
 	std::cerr << "cannot map " << name << ": ";
