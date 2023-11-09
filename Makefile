@@ -1,7 +1,10 @@
 CFLAGS =
 CXXFLAGS =
-CC = gcc
-CXX = g++
+ifdef TARGET
+  TARGET_PREFIX = $(TARGET)-
+endif
+CC = $(TARGET_PREFIX)gcc
+CXX = $(TARGET_PREFIX)g++
 
 all: disasm emulate
 
