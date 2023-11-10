@@ -188,12 +188,36 @@ private:
   void set_word_impl(uint32_t, uint32_t) override {}
 };
 
-template<auto Conv> class fn_array_device : public device {
+[[gnu::always_inline]]
+static inline uint32_t byteconv(uint32_t word) {
+  if constexpr(std::endian::native == std::endian::big) {
+#ifdef __GNUC__
+    word = __builtin_bswap32(word);
+#else
+    const uint32_t orig = word;
+    word = 0;
+    word |= orig >> 24;
+    word |= orig >> 8 & 0xFF00;
+    word |= orig << 8 & 0xFF0000;
+    word |= orig << 24 & 0xFF000000;
+#endif
+  }
+  return word;
+}
+
+class array_device;
+
+static array_device * largest_readable = nullptr;
+
+class array_device : public device {
   uint32_t * const contents;
 
 protected:
-  fn_array_device(uint32_t * contents, uint32_t base, uint32_t lim)
-    : device{base, lim}, contents{contents} {}
+  array_device(uint32_t * contents, uint32_t base, uint32_t lim)
+    : device{base, lim}, contents{contents} {
+    if(!largest_readable || lim > largest_readable->get_limit())
+      largest_readable = this;
+  }
 
 private:
   uint32_t& get_aligned_ref(uint32_t off) {
@@ -215,27 +239,26 @@ private:
 
   uint32_t get_alignedl(uint32_t off) {
     if(off >> 2 <= get_limit() >> 2)
-      return Conv(get_aligned_ref(off));
+      return byteconv(get_aligned_ref(off));
     else return 0;
   }
 
   void set_alignedl(uint32_t off, uint32_t word) {
     if(off >> 2 <= get_limit() >> 2)
-      get_aligned_ref(off) = Conv(word);
+      get_aligned_ref(off) = byteconv(word);
   }
 
 public:
   uint32_t get_word_raw(uint32_t off) {
-    if constexpr(std::endian::native == std::endian::little &&
-		 sizeof(uint32_t) == 4 && CHAR_BIT == 8) {
+    if constexpr(sizeof(uint32_t) == 4 && CHAR_BIT == 8) {
       uint32_t res;
-      /* GCC does not optimize the logic below into an unaligned access on
-	 targets that support it, so on byte-addressable little-endian targets
-	 with 8-bit bytes we use memcpy instead. */
+      /* GCC does not optimize the bitshift logic below into an unaligned access
+	 on targets that support it, so on byte-addressable targets with 8-bit
+	 bytes we use memcpy instead. */
       std::memcpy(&res, get_offset(off), sizeof(res));
-      return res;
+      return byteconv(res);
     }
-    if((off & 3) == 0) [[likely]] return Conv(get_exact_ref(off));
+    if((off & 3) == 0) [[likely]] return byteconv(get_exact_ref(off));
     const int bits = (off & 3)*8;
     const uint32_t mask = (uint32_t{1} << bits) - 1;
     const int shift = 32 - bits;
@@ -246,12 +269,12 @@ public:
   }
 
   void set_word_raw(uint32_t off, uint32_t word) {
-    if constexpr(std::endian::native == std::endian::little &&
-		 sizeof(uint32_t) == 4 && CHAR_BIT == 8) {
+    if constexpr(sizeof(uint32_t) == 4 && CHAR_BIT == 8) {
+      const uint32_t src = byteconv(word);
       //as above
-      std::memcpy(get_offset(off), &word, sizeof(word));
+      std::memcpy(get_offset(off), &src, sizeof(src));
     }
-    else if((off & 3) == 0) [[likely]] get_exact_ref(off) = Conv(word);
+    else if((off & 3) == 0) [[likely]] get_exact_ref(off) = byteconv(word);
     else {
       const int bits = (off & 3)*8;
       const uint32_t mask = (uint32_t{1} << bits) - 1;
@@ -284,40 +307,11 @@ private:
 
 static inline uint32_t uint32_id(uint32_t n) { return n; }
 
-[[gnu::always_inline]]
-static inline uint32_t byteconv(uint32_t word) {
-  if constexpr(std::endian::native == std::endian::big) {
-#ifdef __GNUC__
-    word = __builtin_bswap32(word);
-#else
-    const uint32_t orig = word;
-    word = 0;
-    word |= orig >> 24;
-    word |= orig >> 8 & 0xFF00;
-    word |= orig << 8 & 0xFF0000;
-    word |= orig << 24 & 0xFF000000;
-#endif
-  }
-  return word;
-}
-
-template<bool> class array_device : public fn_array_device<uint32_id> {
-public:
-  using fn_array_device::fn_array_device;
-};
-
-template<> class array_device<false>
-  : public fn_array_device<std::endian::native == std::endian::big
-			   ? byteconv : uint32_id> {
-public:
-  using fn_array_device::fn_array_device;
-};
-
 class memory;
 
 static memory * largest_memory = nullptr;
 
-class memory final : public array_device<true> {
+class memory final : public array_device {
 public:
   memory(uint32_t base, uint32_t lim)
     : array_device{[&]() {
@@ -344,7 +338,7 @@ template<typename T> static auto make_unsigned(T val) {
   return static_cast<std::make_unsigned_t<T>>(val);
 }
 
-class mmap_device : public array_device<false> {
+class mmap_device : public array_device {
   mmap_device(uint32_t base, std::pair<uint32_t*, uint32_t> internal)
     : array_device{internal.first, base, internal.second} {}
 
@@ -377,16 +371,9 @@ public:
     }()} {}
 };
 
-class mmap_ROM;
-
-static mmap_ROM * largest_ROM = nullptr;
-
 class mmap_ROM final : public read_only_device<mmap_device> {
 public:
-  mmap_ROM(const char * name, uint32_t base) : read_only_device{name, base} {
-    if(!largest_ROM || get_limit() > largest_ROM->get_limit())
-      largest_ROM = this;
-  }
+  mmap_ROM(const char * name, uint32_t base) : read_only_device{name, base} {}
 };
 
 class stdio : public device {
@@ -659,23 +646,12 @@ public:
   }
 
   void execute() {
-    device * const largest_readable =
-      largest_ROM && (!largest_memory ||
-		      largest_ROM->get_limit() > largest_memory->get_limit())
-      ? static_cast<device*>(largest_ROM)
-      : static_cast<device*>(largest_memory);
-
     bool single_step = false;
     for(;; pc += 4) {
       const auto get = [&](uint32_t addr) {
-	if(word_in_device_range(addr, largest_readable)) {
-	  if(largest_readable == largest_ROM)
-	    return
-	      largest_ROM->get_word_raw(addr - largest_readable->get_base());
-	  else
-	    return
-	      largest_memory->get_word_raw(addr - largest_readable->get_base());
-	}
+	if(word_in_device_range(addr, largest_readable))
+	  return
+	    largest_readable->get_word_raw(addr - largest_readable->get_base());
 	else return get_word(addr);
       };
 
