@@ -21,6 +21,7 @@
 #include <algorithm>
 #include <functional>
 #include <memory>
+#include <new>
 #include <utility>
 #include <chrono>
 #include <stdexcept>
@@ -284,6 +285,8 @@ public:
     }
   }
 
+  void shadow_ROM(uint32_t, int, uint32_t);
+
 private:
   uint32_t get_word_impl(uint32_t off) override {
     return get_word_raw(off);
@@ -317,13 +320,18 @@ public:
     : array_device{[&]() {
       if(lim >= UINT32_MAX - 3 && UINT32_MAX == SIZE_MAX)
 	throw std::bad_alloc();
+      const long pagesize = sysconf(_SC_PAGESIZE);
+      const std::align_val_t align = static_cast<std::align_val_t>(pagesize);
+      const uint32_t ps = static_cast<uint32_t>(pagesize);
+      lim = ((lim + ps) & ~ps) - 1;
       const size_t size = (static_cast<size_t>(lim) + 4) >> 2;
       uint32_t * const contents =
 	/* On byte-addressable machines, we allocate a character array to
 	   allow unaligned access (using memcpy) without undefined behaviour.
 	   On other machines, we allocate a uint32_t array to save space. */
 	sizeof(uint32_t) == 4
-	? reinterpret_cast<uint32_t*>(new char[lim + 1]) : new uint32_t[size];
+	? reinterpret_cast<uint32_t*>(new(align) char[lim + 1])
+	: new(align) uint32_t[size];
       std::memset(contents, 0, lim + 1);
       return contents;
     }(), base, lim} {
@@ -339,42 +347,39 @@ template<typename T> static auto make_unsigned(T val) {
 }
 
 class mmap_device : public array_device {
-  mmap_device(uint32_t base, std::pair<uint32_t*, uint32_t> internal)
-    : array_device{internal.first, base, internal.second} {}
-
 public:
-  mmap_device(const char * name, uint32_t base)
-    : mmap_device{base, [&]() {
+  mmap_device(int fd, uint32_t base, uint32_t limit)
+    : array_device{[&]() {
       uint32_t * contents = NULL;
-      int fd;
-      if((fd = open(name, O_RDONLY)) == -1) {
-	std::cerr << "cannot open " << name << " for reading: ";
-	std::perror("");
-	std::exit(-3);
-      }
-      struct stat st;
-      if(fstat(fd, &st) == -1) {
-	std::cerr << "cannot stat " << name << ": ";
-	std::perror("");
-	std::exit(-3);
-      }
-      const uint32_t limit =
-	(make_unsigned(st.st_size) >= UINT32_MAX - 4
-	 ? UINT32_MAX - 4 : st.st_size) - 1;
       const auto ptr = mmap(NULL, limit + 1, PROT_READ, MAP_PRIVATE, fd, 0);
       if((contents = static_cast<uint32_t*>(ptr)) == MAP_FAILED) {
-	std::cerr << "cannot map " << name << ": ";
-	std::perror("");
+	std::perror("cannot map ROM");
 	std::exit(-3);
       }
-      return std::pair { contents, limit };
-    }()} {}
+      return contents;
+    }(), base, limit} {}
 };
 
 class mmap_ROM final : public read_only_device<mmap_device> {
 public:
-  mmap_ROM(const char * name, uint32_t base) : read_only_device{name, base} {}
+  mmap_ROM(int fd, uint32_t base, uint32_t limit)
+    : read_only_device{fd, base, limit} {}
 };
+
+void array_device::shadow_ROM(uint32_t off, int fd, uint32_t lim) {
+  assert(std::uint64_t{off} + lim <= get_limit());
+  char * cur = get_offset(off);
+  std::size_t left = std::size_t{lim} + 1;
+  ssize_t nread;
+  while((nread = read(fd, cur, left)) > 0) {
+    cur += nread;
+    left -= nread;
+  }
+  if(nread == -1) {
+    std::perror("cannot read ROM");
+    std::exit(-3);
+  }
+}
 
 class stdio : public device {
   std::atomic_bool output_finished;
@@ -832,6 +837,25 @@ public:
   }
 };
 
+static auto open_ROM(const char * name) {
+  int fd;
+  if((fd = open(name, O_RDONLY)) == -1) {
+    std::cerr << "cannot open " << name << " for reading: ";
+    std::perror("");
+    std::exit(-3);
+  }
+  struct stat st;
+  if(fstat(fd, &st) == -1) {
+    std::cerr << "cannot stat " << name << ": ";
+    std::perror("");
+    std::exit(-3);
+  }
+  const uint32_t limit =
+    (make_unsigned(st.st_size) >= UINT32_MAX - 4
+     ? UINT32_MAX - 4 : st.st_size) - 1;
+  return std::pair{fd, limit};
+}
+
 int main(int argc, char * const * argv) {
   new zero_device{0, 0xFFFFFFFF};
   std::optional<uint32_t> stdio_base;
@@ -865,33 +889,32 @@ int main(int argc, char * const * argv) {
       bad_number();
     return res;
   };
+  const auto parse_number1 = [&](const char * start) {
+    return parse_number(start, start + strlen(start));
+  };
   const auto parse_comma = [&]() {
     const char * const comma = std::strchr(optarg, ',');
     if(!comma) no_comma();
     const uint32_t value = parse_number(optarg, comma);
     return std::pair{value, comma + 1};
   };
+  std::vector<std::pair<uint32_t, const char*>> memories, ROMs;
   while((c = getopt_long(argc, argv, "s:m:r:b:", opts, &longindex)) != -1) {
     switch(c) {
     case 's':
-      stdio_base = parse_number(optarg, optarg + strlen(optarg));
+      stdio_base = parse_number1(optarg);
       break;
     case 'm':
-      { const auto [base, end] = parse_comma();
-	const uint32_t lim = parse_number(end, end + strlen(end));
-	new memory(base, lim);
-      }
+      memories.push_back(parse_comma());
       break;
     case 'r':
-      { const auto [value, path] = parse_comma();
-	new mmap_ROM(path, value);
-      }
+      ROMs.push_back(parse_comma());
       break;
     case 't':
-      ticks_base = parse_number(optarg, optarg + strlen(optarg));
+      ticks_base = parse_number1(optarg);
       break;
     case 'b':
-      cpu.add_breakpoint(parse_number(optarg, optarg + strlen(optarg)));
+      cpu.add_breakpoint(parse_number1(optarg));
       break;
     case '?':
       return -1;
@@ -899,6 +922,19 @@ int main(int argc, char * const * argv) {
       assert(false);
       return -1;
     }
+  }
+  for(const auto& args : memories)
+    new memory(args.first, parse_number1(args.second));
+  for(const auto& args : ROMs) {
+    const auto [fd, limit] = open_ROM(args.second);
+    device * const start = get_device(args.first);
+    device * const end = get_device(args.first + limit);
+    if(start == end && typeid(*start) == typeid(memory)) {
+      const auto mem = static_cast<memory*>(start);
+      mem->shadow_ROM(args.first - mem->get_base(), fd, limit);
+      close(fd);
+    }
+    else new mmap_ROM(fd, args.first, limit);
   }
   if(stdio_base) new stdio(*stdio_base);
   if(ticks_base) new ticks(*ticks_base);
