@@ -128,6 +128,7 @@ void CPU::execute() {
     const uint32_t inst = get(pc);
 
     for(auto it = breakpoints.cbegin(); it != breakpoints.cend();) {
+      [[unlikely]]
       if(pc == it->addr) {
 	single_step = true;
 	if(it->num == -1) {
