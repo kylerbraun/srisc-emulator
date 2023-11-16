@@ -115,6 +115,95 @@ void CPU::add_breakpoint(uint32_t addr) {
   breakpoints.push_back({ next_breakpoint++, addr });
 }
 
+void CPU::check_breakpoint(bool& single_step,
+			   std::vector<breakpoint>::const_iterator& it) {
+  if(pc == it->addr) {
+    single_step = true;
+    if(it->num == -1) {
+      it = breakpoints.erase(it);
+      return;
+    }
+    std::cerr << "breakpoint " << it->num
+	      << " at 0x" << std::hex << it->addr << std::dec << '\n';
+  }
+  ++it;
+}
+
+void CPU::single_step(bool& single_step, uint32_t inst) {
+  std::cerr << "0x" << std::hex << pc << std::dec << ": ";
+  print_inst(inst, stderr);
+  while(true) {
+    std::cerr << "> ";
+    command_line cmdline{std::cin};
+    if(!cmdline.get_command()) continue;
+    const auto mcmd = cmdline.get_command();
+    if(!mcmd) continue;
+    const auto& cmd = *mcmd;
+
+    const auto get_num = [&](int n) -> std::optional<uint32_t> {
+      const auto arg = cmdline.get_arg(n);
+      if(!arg) {
+	std::cerr << "not enough arguments\n";
+	return std::nullopt;
+      }
+      const auto num = arg->parse();
+      if(!num) {
+	const std::string_view bad = *arg;
+	std::cerr << "bad number: " << bad << '\n';
+	return std::nullopt;
+      }
+      return num;
+    };
+
+    unsigned ri;
+    bool byte, hword;
+    if(cmd.size() == 2 && cmd[0] == 'r' && (ri = cmd[1] - '0') < 8)
+      print_num(regs[ri]);
+
+    else if((byte = cmd == "byte"sv) || (hword = cmd == "hword"sv)
+	    || cmd == "word"sv) {
+      const auto addr = get_num(0);
+      if(!addr) continue;
+      if(byte) print_num(get_byte(*addr));
+      else print_num(get_word(*addr) & (hword ? 0xFFFF : 0xFFFFFFFF));
+    }
+
+    else if(cmd == "b"sv || cmd == "break"sv) {
+      const auto addr = get_num(0);
+      if(!addr) continue;
+      add_breakpoint(*addr);
+    }
+
+    else if(cmd == "d"sv || cmd == "delete"sv) {
+      const auto num = get_num(0);
+      if(!num) continue;
+      for(auto it = breakpoints.cbegin(); it != breakpoints.cend();
+	  ++it) {
+	if(static_cast<int>(*num) == it->num) {
+	  breakpoints.erase(it);
+	  break;
+	}
+      }
+    }
+
+    else if(cmd == "s"sv || cmd == "step"sv)
+      break;
+
+    else if(cmd == "n"sv || cmd == "next"sv) {
+      breakpoints.push_back({ -1, pc + 4 });
+      single_step = false;
+      break;
+    }
+
+    else if(cmd == "c"sv || cmd == "continue"sv) {
+      single_step = false;
+      break;
+    }
+
+    else std::cerr << "unknown debugger command: " << cmd << '\n';
+  }
+}
+
 void CPU::execute() {
   bool single_step = false;
   for(;; pc += 4) {
@@ -127,94 +216,7 @@ void CPU::execute() {
 
     const uint32_t inst = get(pc);
 
-    for(auto it = breakpoints.cbegin(); it != breakpoints.cend();) {
-      [[unlikely]]
-      if(pc == it->addr) {
-	single_step = true;
-	if(it->num == -1) {
-	  it = breakpoints.erase(it);
-	  continue;
-	}
-	std::cerr << "breakpoint " << it->num
-		  << " at 0x" << std::hex << it->addr << std::dec << '\n';
-      }
-      ++it;
-    }
-
-    if(single_step) {
-      std::cerr << "0x" << std::hex << pc << std::dec << ": ";
-      print_inst(inst, stderr);
-      while(true) {
-	std::cerr << "> ";
-	command_line cmdline{std::cin};
-	if(!cmdline.get_command()) continue;
-	const auto mcmd = cmdline.get_command();
-	if(!mcmd) continue;
-	const auto& cmd = *mcmd;
-
-	const auto get_num = [&](int n) -> std::optional<uint32_t> {
-	  const auto arg = cmdline.get_arg(n);
-	  if(!arg) {
-	    std::cerr << "not enough arguments\n";
-	    return std::nullopt;
-	  }
-	  const auto num = arg->parse();
-	  if(!num) {
-	    const std::string_view bad = *arg;
-	    std::cerr << "bad number: " << bad << '\n';
-	    return std::nullopt;
-	  }
-	  return num;
-	};
-
-	unsigned ri;
-	bool byte, hword;
-	if(cmd.size() == 2 && cmd[0] == 'r' && (ri = cmd[1] - '0') < 8)
-	  print_num(regs[ri]);
-
-	else if((byte = cmd == "byte"sv) || (hword = cmd == "hword"sv)
-		|| cmd == "word"sv) {
-	  const auto addr = get_num(0);
-	  if(!addr) continue;
-	  if(byte) print_num(get_byte(*addr));
-	  else print_num(get_word(*addr) & (hword ? 0xFFFF : 0xFFFFFFFF));
-	}
-
-	else if(cmd == "b"sv || cmd == "break"sv) {
-	  const auto addr = get_num(0);
-	  if(!addr) continue;
-	  add_breakpoint(*addr);
-	}
-
-	else if(cmd == "d"sv || cmd == "delete"sv) {
-	  const auto num = get_num(0);
-	  if(!num) continue;
-	  for(auto it = breakpoints.cbegin(); it != breakpoints.cend();
-	      ++it) {
-	    if(static_cast<int>(*num) == it->num) {
-	      breakpoints.erase(it);
-	      break;
-	    }
-	  }
-	}
-
-	else if(cmd == "s"sv || cmd == "step"sv)
-	  break;
-
-	else if(cmd == "n"sv || cmd == "next"sv) {
-	  breakpoints.push_back({ -1, pc + 4 });
-	  single_step = false;
-	  break;
-	}
-
-	else if(cmd == "c"sv || cmd == "continue"sv) {
-	  single_step = false;
-	  break;
-	}
-
-	else std::cerr << "unknown debugger command: " << cmd << '\n';
-      }
-    }
+    maybe_single_step(single_step, inst);
 
     const enum opcode opcode = inst_opcode(inst);
     uint32_t * const rd = regs + inst_rd(inst);
