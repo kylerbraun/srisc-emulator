@@ -8,8 +8,8 @@ CXX = $(TARGET_PREFIX)g++
 
 all: disasm emulate
 
-emulate: emulate.o cpu.o device.o print.o
-	$(CXX) emulate.o cpu.o device.o print.o -o emulate
+emulate: emulate.o cpu.o execute.o device.o print.o
+	$(CXX) emulate.o cpu.o execute.o device.o print.o -o emulate
 
 disasm: disasm.o print.o
 	$(CC) disasm.o print.o -o disasm
@@ -23,11 +23,14 @@ disasm.o: disasm.c emulate.h
 device.o: device.cc device.h
 	$(CXX) $(CXXFLAGS) -c -Wall -Wextra -std=c++20 device.cc -o device.o
 
-cpu.o: cpu.cc cpu.h device.h
+cpu.o: cpu.cc cpu.h device.h emulate.h
 	$(CXX) $(CXXFLAGS) -c -Wall -Wextra -std=c++20 cpu.cc -o cpu.o
+
+execute.o: execute.cc cpu.h device.h emulate.h
+	$(CXX) $(CXXFLAGS) -c -Wall -Wextra -Wno-tautological-compare -std=c++20 execute.cc -o execute.o
 
 emulate.o: emulate.cc emulate.h cpu.h device.h
 	$(CXX) $(CXXFLAGS) -c -Wall -Wextra -std=c++20 emulate.cc -o emulate.o
 
 clean:
-	rm -f emulate.o cpu.o device.o print.o disasm.o emulate disasm
+	rm -f emulate.o cpu.o execute.o device.o print.o disasm.o emulate disasm
