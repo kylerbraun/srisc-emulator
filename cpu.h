@@ -18,6 +18,7 @@ class CPU {
 
   void check_breakpoint(bool&, std::vector<breakpoint>::const_iterator&);
 
+  [[gnu::always_inline]]
   void check_breakpoints(bool& single_step) {
     for(auto it = breakpoints.cbegin(); it != breakpoints.cend();) {
       [[unlikely]]
@@ -27,6 +28,7 @@ class CPU {
 
   void single_step(bool&, uint32_t);
 
+  [[gnu::always_inline]]
   void maybe_single_step(bool& single_step, uint32_t inst) {
     check_breakpoints(single_step);
     if(single_step) this->single_step(single_step, inst);

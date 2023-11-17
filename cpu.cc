@@ -204,102 +204,138 @@ void CPU::single_step(bool& single_step, uint32_t inst) {
   }
 }
 
+#define OP_CASE(op) \
+  case OP_ ## op:   \
+  goto op
+
+#define FIRST_INST {				\
+  inst = get(pc);				\
+  maybe_single_step(single_step, inst);		\
+  imm = inst_imm(inst);				\
+  switch(inst_opcode(inst)) {			\
+    OP_CASE(ADD);				\
+    OP_CASE(SUB);				\
+    OP_CASE(AND);				\
+    OP_CASE(OR);				\
+    OP_CASE(XOR);				\
+    OP_CASE(NOT);				\
+    OP_CASE(LOAD);				\
+    OP_CASE(STORE);				\
+    OP_CASE(JUMP);				\
+    OP_CASE(BRANCH);				\
+    OP_CASE(CMP);				\
+    OP_CASE(BEQ);				\
+    OP_CASE(BNE);				\
+    OP_CASE(BLT);				\
+    OP_CASE(BGT);				\
+    OP_CASE(LOADI);				\
+    OP_CASE(CALL);				\
+    OP_CASE(LOADI16);				\
+    OP_CASE(LOADI16H);				\
+  default:					\
+    goto invalid;				\
+  }						\
+  }
+
+#define NEXT_INST				\
+  pc += 4;					\
+  FIRST_INST
+
+[[gnu::always_inline]]
+static inline uint32_t get(uint32_t addr) {
+  if(word_in_device_range(addr, largest_readable))
+    return
+      largest_readable->get_word_raw(addr - largest_readable->get_base());
+  else return get_word(addr);
+}
+
 void CPU::execute() {
   bool single_step = false;
-  for(;; pc += 4) {
-    const auto get = [&](uint32_t addr) {
-      if(word_in_device_range(addr, largest_readable))
-	return
-	  largest_readable->get_word_raw(addr - largest_readable->get_base());
-      else return get_word(addr);
-    };
 
-    const uint32_t inst = get(pc);
+  uint32_t inst, imm;
+  FIRST_INST;
 
-    maybe_single_step(single_step, inst);
+#define rd (regs[inst_rd(inst)])
+#define rs1 (regs[inst_rs1(inst)])
+#define rs2 (regs[inst_rs2(inst)])
 
-    const enum opcode opcode = inst_opcode(inst);
-    uint32_t * const rd = regs + inst_rd(inst);
-    uint32_t * const rs1 = regs + inst_rs1(inst);
-    uint32_t * const rs2 = regs + inst_rs2(inst);
-    const uint32_t imm = inst_imm(inst);
-    switch(opcode) {
-    case OP_ADD:
-      *rd = *rs1 + *rs2;
-      break;
-    case OP_SUB:
-      *rd = *rs1 - *rs2;
-      break;
-    case OP_AND:
-      *rd = *rs1 & *rs2;
-      break;
-    case OP_OR:
-      *rd = *rs1 | *rs2;
-      break;
-    case OP_XOR:
-      *rd = *rs1 ^ *rs2;
-      break;
-    case OP_NOT:
-      *rd = ~*rs1;
-      break;
-    case OP_LOAD:
-      *rd = get(*rs2 + imm);
-      break;
-    case OP_STORE:
-      { const uint32_t dest = *rs2 + imm;
-	if(word_in_device_range(dest, largest_memory))
-	  largest_memory->set_word_raw(dest - largest_memory->get_base(),
-				       *rd);
-	else set_word(dest, *rd);
-      }
-      break;
-    case OP_JUMP:
-      pc += imm;
-      break;
-    case OP_BRANCH:
-      if(!*rs2) pc += imm;
-      break;
-    case OP_CMP:
-      Z = *rs1 == *rs2;
-      N = static_cast<int32_t>(*rs1) < static_cast<int32_t>(*rs2);
-      cmp = true;
-      break;
-    case OP_BEQ:
-      if(cmp ? Z : *rs2 == 0)
-	pc += imm;
-      break;
-    case OP_BNE:
-      if(cmp ? !Z : *rs2 != 0)
-	pc += imm;
-      break;
-    case OP_BLT:
-      if(cmp ? N : *rs2 & 0x80000000)
-	pc += imm;
-      break;
-    case OP_BGT:
-      if(cmp ? !N && !Z : !(*rs2 & 0x80000000))
-	pc += imm;
-      break;
-    case OP_LOADI:
-      *rd = inst_loadi_imm(inst);
-      break;
-    case OP_CALL:
-      if(inst_rs1(inst) != 0 || inst_rs2(inst) != 0 || imm != 0)
-	goto invalid;
-      pc = *rd - 4;
-      break;
-    case OP_LOADI16:
-      *rd &= 0xFFFF0000;
-      *rd |= imm & 0xFFFF;
-      break;
-    case OP_LOADI16H:
-      *rd &= 0xFFFF;
-      *rd |= imm << 16;
-      break;
-    default:
-    invalid:
-      fprintf(stderr, "invalid opcode\n");
-      exit(-2);
-    }
+ ADD:
+  rd = rs1 + rs2;
+  NEXT_INST;
+ SUB:
+  rd = rs1 - rs2;
+  NEXT_INST;
+ AND:
+  rd = rs1 & rs2;
+  NEXT_INST;
+ OR:
+  rd = rs1 | rs2;
+  NEXT_INST;
+ XOR:
+  rd = rs1 ^ rs2;
+  NEXT_INST;
+ NOT:
+  rd = ~rs1;
+  NEXT_INST;
+ LOAD:
+  rd = get(rs2 + imm);
+  NEXT_INST;
+ STORE:
+  { const uint32_t dest = rs2 + imm;
+    if(word_in_device_range(dest, largest_memory))
+      largest_memory->set_word_raw(dest - largest_memory->get_base(),
+				   rd);
+    else set_word(dest, rd);
   }
+  NEXT_INST;
+ JUMP:
+  pc += imm;
+  NEXT_INST;
+ BRANCH:
+  if(!rs2) pc += imm;
+  NEXT_INST;
+ CMP:
+  Z = rs1 == rs2;
+  N = static_cast<int32_t>(rs1) < static_cast<int32_t>(rs2);
+  cmp = true;
+  NEXT_INST;
+ BEQ:
+  if(cmp ? Z : rs2 == 0)
+    pc += imm;
+  NEXT_INST;
+ BNE:
+  if(cmp ? !Z : rs2 != 0)
+    pc += imm;
+  NEXT_INST;
+ BLT:
+  if(cmp ? N : rs2 & 0x80000000)
+    pc += imm;
+  NEXT_INST;
+ BGT:
+  if(cmp ? !N && !Z : !(rs2 & 0x80000000))
+    pc += imm;
+  NEXT_INST;
+ LOADI:
+  rd = inst_loadi_imm(inst);
+  NEXT_INST;
+ CALL:
+  if(inst_rs1(inst) != 0 || inst_rs2(inst) != 0 || imm != 0)
+    goto invalid;
+  pc = rd - 4;
+  NEXT_INST;
+ LOADI16:
+  rd &= 0xFFFF0000;
+  rd |= imm & 0xFFFF;
+  NEXT_INST;
+ LOADI16H:
+  rd &= 0xFFFF;
+  rd |= imm << 16;
+  NEXT_INST;
+ invalid:
+  fprintf(stderr, "invalid opcode\n");
+  exit(-2);
+
+#undef rd
+#undef rs1
+#undef rs2
 }
