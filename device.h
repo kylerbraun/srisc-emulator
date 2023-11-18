@@ -93,14 +93,11 @@ template<typename Entry> struct shift<std::array<NLE<Entry>, 1024>> {
 
 extern std::array<L3E, 1024> devtab;
 
-inline bool byte_in_device_range(std::uint32_t addr, device * dev) {
-  return addr >= dev->get_base() && addr - dev->get_base() < dev->get_limit();
+inline bool word_in_range(std::uint32_t addr,
+			  std::uint32_t base, std::uint32_t limit) {
+  return addr >= base && addr + 3 - base <= limit;
 }
 
-inline bool word_in_device_range(std::uint32_t addr, device * dev) {
-  return dev && addr >= dev->get_base()
-    && addr + 3 - dev->get_base() < dev->get_limit();
-}
 [[gnu::always_inline]]
 inline std::uint32_t byteconv(std::uint32_t word) {
   if constexpr(std::endian::native == std::endian::big) {
@@ -118,97 +115,111 @@ inline std::uint32_t byteconv(std::uint32_t word) {
   return word;
 }
 
+inline std::uint32_t& get_aligned_ref(std::uint32_t * contents,
+				      std::uint32_t off) {
+  return contents[off >> 2];
+}
+
+inline char * get_offset(std::uint32_t * contents, std::uint32_t off) {
+  return reinterpret_cast<char*>(contents) + off;
+}
+
+/* GCC is unable to optimize out the bitshift in get_aligned_ref even if we
+   first make sure the offset is aligned.  We therefore need this function to
+   optimize out the bitshift. */
+inline std::uint32_t& get_exact_ref(std::uint32_t * contents,
+				    std::uint32_t off) {
+  if constexpr(sizeof(std::uint32_t) == 4)
+    return *reinterpret_cast<std::uint32_t*>(get_offset(contents, off));
+  else return get_aligned_ref(contents, off);
+}
+
+inline std::uint32_t get_alignedl(std::uint32_t * contents, std::uint32_t limit,
+			   std::uint32_t off) {
+  if(off >> 2 <= limit >> 2)
+    return byteconv(get_aligned_ref(contents, off));
+  else return 0;
+}
+
+inline void set_alignedl(std::uint32_t * contents, std::uint32_t limit,
+			 std::uint32_t off, std::uint32_t word) {
+  if(off >> 2 <= limit >> 2)
+    get_aligned_ref(contents, off) = byteconv(word);
+}
+
+inline std::uint32_t get_word_raw(std::uint32_t * contents, std::uint32_t limit,
+				  std::uint32_t off) {
+  if constexpr(sizeof(std::uint32_t) == 4 && CHAR_BIT == 8) {
+    std::uint32_t res;
+    /* GCC does not optimize the bitshift logic below into an unaligned access
+       on targets that support it, so on byte-addressable targets with 8-bit
+       bytes we use memcpy instead. */
+    std::memcpy(&res, get_offset(contents, off), sizeof(res));
+    return byteconv(res);
+  }
+  if((off & 3) == 0) [[likely]] return byteconv(get_exact_ref(contents, off));
+  const int bits = (off & 3)*8;
+  const std::uint32_t mask = (std::uint32_t{1} << bits) - 1;
+  const int shift = 32 - bits;
+  std::uint32_t res = 0;
+  res = (get_alignedl(contents, limit, off + 4) & mask) << shift;
+  res |= (get_alignedl(contents, limit, off) & ~mask) >> bits;
+  return res;
+}
+
+inline void set_word_raw(std::uint32_t * contents, std::uint32_t limit,
+			 std::uint32_t off, std::uint32_t word) {
+  if constexpr(sizeof(std::uint32_t) == 4 && CHAR_BIT == 8) {
+    const std::uint32_t src = byteconv(word);
+    //as above
+    std::memcpy(get_offset(contents, off), &src, sizeof(src));
+  }
+  else if((off & 3) == 0)
+    [[likely]] get_exact_ref(contents, off) = byteconv(word);
+  else {
+    const int bits = (off & 3)*8;
+    const std::uint32_t mask = (std::uint32_t{1} << bits) - 1;
+    const int shift = 32 - bits;
+    set_alignedl(contents, limit, off + 4,
+		 (get_alignedl(contents, limit, off + 4) & ~mask)
+		 | word >> shift);
+    set_alignedl(contents, limit, off,
+		 (get_alignedl(contents, limit, off) & mask) | word << bits);
+  }
+}
+
 class array_device : public device {
   std::uint32_t * const contents;
 
 protected:
   array_device(std::uint32_t*, std::uint32_t, std::uint32_t);
 
-private:
-  std::uint32_t& get_aligned_ref(std::uint32_t off) {
-    return contents[off >> 2];
-  }
-
-  char * get_offset(std::uint32_t off) {
-    return reinterpret_cast<char*>(contents) + off;
-  }
-
-  /* GCC is unable to optimize out the bitshift in get_aligned_ref even if we
-     first make sure the offset is aligned.  We therefore need this function to
-     optimize out the bitshift. */
-  std::uint32_t& get_exact_ref(std::uint32_t off) {
-    if constexpr(sizeof(std::uint32_t) == 4)
-      return *reinterpret_cast<std::uint32_t*>(get_offset(off));
-    else return get_aligned_ref(off);
-  }
-
-  std::uint32_t get_alignedl(std::uint32_t off) {
-    if(off >> 2 <= get_limit() >> 2)
-      return byteconv(get_aligned_ref(off));
-    else return 0;
-  }
-
-  void set_alignedl(std::uint32_t off, std::uint32_t word) {
-    if(off >> 2 <= get_limit() >> 2)
-      get_aligned_ref(off) = byteconv(word);
-  }
-
 public:
-  std::uint32_t get_word_raw(std::uint32_t off) {
-    if constexpr(sizeof(std::uint32_t) == 4 && CHAR_BIT == 8) {
-      std::uint32_t res;
-      /* GCC does not optimize the bitshift logic below into an unaligned access
-	 on targets that support it, so on byte-addressable targets with 8-bit
-	 bytes we use memcpy instead. */
-      std::memcpy(&res, get_offset(off), sizeof(res));
-      return byteconv(res);
-    }
-    if((off & 3) == 0) [[likely]] return byteconv(get_exact_ref(off));
-    const int bits = (off & 3)*8;
-    const std::uint32_t mask = (std::uint32_t{1} << bits) - 1;
-    const int shift = 32 - bits;
-    std::uint32_t res = 0;
-    res = (get_alignedl(off + 4) & mask) << shift;
-    res |= (get_alignedl(off) & ~mask) >> bits;
-    return res;
-  }
-
-  void set_word_raw(std::uint32_t off, std::uint32_t word) {
-    if constexpr(sizeof(std::uint32_t) == 4 && CHAR_BIT == 8) {
-      const std::uint32_t src = byteconv(word);
-      //as above
-      std::memcpy(get_offset(off), &src, sizeof(src));
-    }
-    else if((off & 3) == 0) [[likely]] get_exact_ref(off) = byteconv(word);
-    else {
-      const int bits = (off & 3)*8;
-      const std::uint32_t mask = (std::uint32_t{1} << bits) - 1;
-      const int shift = 32 - bits;
-      set_alignedl(off + 4, (get_alignedl(off + 4) & ~mask) | word >> shift);
-      set_alignedl(off, (get_alignedl(off) & mask) | word << bits);
-    }
+  std::uint32_t * get_contents() {
+    return contents;
   }
 
   void shadow_ROM(std::uint32_t, int, std::uint32_t);
 
 private:
   std::uint32_t get_word_impl(std::uint32_t off) override {
-    return get_word_raw(off);
+    return get_word_raw(contents, get_limit(), off);
   }
 
   std::uint8_t get_byte_impl(std::uint32_t off) override {
     if(off > get_limit()) return 0;
-    return get_alignedl(off) >> (off & 3)*8 & 0xFF;
+    return get_alignedl(contents, get_limit(), off) >> (off & 3)*8 & 0xFF;
   }
 
   void set_word_impl(std::uint32_t off, std::uint32_t word) override {
-    set_word_raw(off, word);
+    set_word_raw(contents, get_limit(), off, word);
   }
 
   void set_byte_impl(std::uint32_t off, std::uint8_t byte) override {
     const std::uint32_t bstart = (off & 3)*8;
-    set_alignedl(off, ((get_alignedl(off) & ~(0xFF << bstart))
-		       | std::uint32_t{byte} << bstart));
+    set_alignedl(contents, get_limit(), off,
+		 ((get_alignedl(contents, get_limit(), off) & ~(0xFF << bstart))
+		  | std::uint32_t{byte} << bstart));
   }
 };
 

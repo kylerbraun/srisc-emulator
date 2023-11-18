@@ -26,11 +26,14 @@ device.o: device.cc device.h
 cpu.o: cpu.cc cpu.h device.h emulate.h
 	$(CXX) $(CXXFLAGS) -c -Wall -Wextra -std=c++20 cpu.cc -o cpu.o
 
-execute.o: execute.cc cpu.h device.h emulate.h
-	$(CXX) $(CXXFLAGS) -c -Wall -Wextra -Wno-tautological-compare -std=c++20 execute.cc -o execute.o
+execute.s: execute.cc cpu.h device.h emulate.h
+	$(CXX) $(CXXFLAGS) -S -Wall -Wextra -Wno-tautological-compare -fverbose-asm -std=c++20 execute.cc -o execute.s
+
+execute.o: execute.s
+	$(CC) -c execute.s -o execute.o
 
 emulate.o: emulate.cc emulate.h cpu.h device.h
 	$(CXX) $(CXXFLAGS) -c -Wall -Wextra -std=c++20 emulate.cc -o emulate.o
 
 clean:
-	rm -f emulate.o cpu.o execute.o device.o print.o disasm.o emulate disasm
+	rm -f emulate.o cpu.o execute.o execute.s device.o print.o disasm.o emulate disasm

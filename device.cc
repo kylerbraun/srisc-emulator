@@ -72,7 +72,7 @@ array_device::array_device(uint32_t * contents, uint32_t base, uint32_t lim)
 
 void array_device::shadow_ROM(uint32_t off, int fd, uint32_t lim) {
   assert(std::uint64_t{off} + lim <= get_limit());
-  char * cur = get_offset(off);
+  char * cur = get_offset(contents, off);
   std::size_t left = std::size_t{lim} + 1;
   ssize_t nread;
   while((nread = read(fd, cur, left)) > 0) {

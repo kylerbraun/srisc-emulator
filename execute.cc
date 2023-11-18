@@ -2,12 +2,10 @@
 #include "device.h"
 #include "emulate.h"
 #include <iostream>
-#ifdef __GNUC__
-#  include <array>
-#endif
 #include <cassert>
 
 using std::uint32_t;
+using std::uint16_t;
 
 #define EXHAUST0(mac, ...)			\
   mac(0 __VA_OPT__(,) __VA_ARGS__)		\
@@ -210,9 +208,8 @@ using std::uint32_t;
 #endif
 
 #define FIRST_INST				\
-  inst = get(pc);				\
+  inst = get(lrc, lrb, lrl, pc);		\
   maybe_single_step(single_step, inst, REGS);	\
-  imm = inst_imm(inst);				\
   GOTO_NEXT_INST
 
 #define NEXT_INST				\
@@ -220,10 +217,10 @@ using std::uint32_t;
   FIRST_INST
 
 [[gnu::always_inline]]
-static inline uint32_t get(uint32_t addr) {
-  if(word_in_device_range(addr, largest_readable))
-    return
-      largest_readable->get_word_raw(addr - largest_readable->get_base());
+static inline uint32_t get(std::uint32_t * lrc, std::uint32_t lrb,
+			   std::uint32_t lrl, uint32_t addr) {
+  if(word_in_range(addr, lrb, lrl) && lrc)
+    [[likely]] return get_word_raw(lrc, lrl, addr - lrb);
   else return get_word(addr);
 }
 
@@ -254,7 +251,7 @@ static inline uint32_t get(uint32_t addr) {
 
 #define LOAD2(rd, rs2)				\
   LOAD##rd##rs2:				\
-  r##rd = get(r##rs2 + imm);			\
+  r##rd = get(lrc, lrb, lrl, r##rs2 + imm);	\
   NEXT_INST
 
 #define LOAD1(rs2)				\
@@ -266,9 +263,8 @@ static inline uint32_t get(uint32_t addr) {
 #define STORE2(rd, rs2)							\
   STORE##rd##rs2:							\
   { const uint32_t dest = r##rs2 + imm;					\
-    if(word_in_device_range(dest, largest_memory))			\
-      largest_memory->set_word_raw(dest - largest_memory->get_base(),	\
-				   r##rd);				\
+    if(word_in_range(dest, lmb, lml) && lmc)				\
+      [[likely]] set_word_raw(lmc, lml, dest - lmb, r##rd);		\
     else set_word(dest, r##rd);						\
   }									\
   NEXT_INST
@@ -334,24 +330,35 @@ static inline uint32_t get(uint32_t addr) {
 #define CALL0()					\
   EXHAUST3(CALL1)
 
-#define LOADI16HW1(rd, HW, mask, lop)		\
-  LOADI16##HW##rd:				\
-  r##rd &= (mask);				\
-  r##rd |= imm lop;				\
+#define MEMCPY_COND (CHAR_BIT == 8 && sizeof(uint32_t) == 2*sizeof(uint16_t))
+
+#define LOADI16HW1(rd, HW, mask, lop)					\
+  LOADI16##HW##rd:							\
+  r##rd &= (mask);							\
+  r##rd |= imm lop;							\
   NEXT_INST
 
-#define LOADI16HW0(HW, mask, lop)		\
+#define LOADI16HW0(HW, mask, lop)			\
   EXHAUST3(LOADI16HW1, HW, mask, lop)
 
 void CPU::execute() {
   bool single_step = false;
+  array_device * const lr = largest_readable;
+  std::uint32_t * const lrc = lr ? lr->get_contents() : nullptr;
+  const std::uint32_t lrb = lr ? lr->get_base() : 0;
+  const std::uint32_t lrl = lr ? lr->get_limit() : 0;
+  memory * const lm = largest_memory;
+  std::uint32_t * const lmc = lm ? lm->get_contents() : nullptr;
+  const std::uint32_t lmb = lm ? lm->get_base() : 0;
+  const std::uint32_t lml = lm ? lm->get_limit() : 0;
 
 #ifdef __GNUC__
   void * labels[(OPCODES + 1) << 9];
   ALL_CASES;
 #endif
 
-  uint32_t inst, imm;
+  uint32_t inst;
+#define imm (inst_imm(inst))
   uint32_t r0 = 0, r1 = 0, r2 = 0, r3 = 0, r4 = 0, r5 = 0, r6 = 0, r7 = 0;
   FIRST_INST;
 
@@ -381,4 +388,5 @@ void CPU::execute() {
  invalid:
   std::cerr << "invalid opcode\n";
   exit(-2);
+#undef imm
 }
