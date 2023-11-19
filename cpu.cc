@@ -116,7 +116,7 @@ void CPU::add_breakpoint(uint32_t addr) {
   breakpoints.push_back({ next_breakpoint++, addr });
 }
 
-void CPU::check_breakpoint(bool& single_step,
+void CPU::check_breakpoint(bool& single_step, uint32_t pc,
 			   std::vector<breakpoint>::const_iterator& it) {
   if(pc == it->addr) {
     single_step = true;
@@ -130,7 +130,8 @@ void CPU::check_breakpoint(bool& single_step,
   ++it;
 }
 
-void CPU::single_step(bool& single_step, uint32_t inst, REGS_PARAMS) {
+void CPU::single_step(bool& single_step, uint32_t pc, uint32_t inst,
+		      REGS_PARAMS) {
   std::cerr << "0x" << std::hex << pc << std::dec << ": ";
   print_inst(inst, stderr);
   while(true) {

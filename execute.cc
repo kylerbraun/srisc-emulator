@@ -207,9 +207,15 @@ using std::uint16_t;
 
 #endif
 
-#define FIRST_INST				\
-  inst = get(lrc, lrb, lrl, pc);		\
-  maybe_single_step(single_step, inst, REGS);	\
+#ifdef __GNUC__
+#  define USE(reg) asm("" : : "r"(reg))
+#else
+#  define USE(reg)
+#endif
+
+#define FIRST_INST					\
+  inst = get(lrc, lrb, lrl, pc);			\
+  maybe_single_step(single_step, pc, inst, REGS);	\
   GOTO_NEXT_INST
 
 #define NEXT_INST				\
@@ -342,6 +348,7 @@ static inline uint32_t get(std::uint32_t * lrc, std::uint32_t lrb,
   EXHAUST3(LOADI16HW1, HW, mask, lop)
 
 void CPU::execute() {
+  uint32_t pc = 0;
   bool single_step = false;
   array_device * const lr = largest_readable;
   std::uint32_t * const lrc = lr ? lr->get_contents() : nullptr;
@@ -359,7 +366,15 @@ void CPU::execute() {
 
   uint32_t inst;
 #define imm (inst_imm(inst))
-  uint32_t r0 = 0, r1 = 0, r2 = 0, r3 = 0, r4 = 0, r5 = 0, r6 = 0, r7 = 0;
+  uint32_t r0 = 0;
+  uint32_t r1 = 0;
+  uint32_t r2 = 0;
+  uint32_t r3 = 0;
+  uint32_t r4 = 0;
+  uint32_t r5 = 0;
+  uint32_t r6 = 0;
+  uint32_t r7 = 0;
+
   FIRST_INST;
 
   BINARY0(ADD, +);

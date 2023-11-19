@@ -15,27 +15,28 @@ class CPU {
     std::uint32_t addr;
   };
 
-  std::uint32_t pc = 0;
   bool Z = false, N = false, cmp = false;
   std::vector<breakpoint> breakpoints;
   int next_breakpoint = 1;
 
-  void check_breakpoint(bool&, std::vector<breakpoint>::const_iterator&);
+  void check_breakpoint(bool&, std::uint32_t,
+			std::vector<breakpoint>::const_iterator&);
 
   [[gnu::always_inline]]
-  void check_breakpoints(bool& single_step) {
+  void check_breakpoints(bool& single_step, std::uint32_t pc) {
     for(auto it = breakpoints.cbegin(); it != breakpoints.cend();) {
       [[unlikely]]
-      check_breakpoint(single_step, it);
+      check_breakpoint(single_step, pc, it);
     }
   }
 
-  void single_step(bool&, uint32_t, REGS_PARAMS);
+  void single_step(bool&, std::uint32_t, std::uint32_t, REGS_PARAMS);
 
   [[gnu::always_inline]]
-  void maybe_single_step(bool& single_step, uint32_t inst, REGS_PARAMS) {
-    check_breakpoints(single_step);
-    if(single_step) this->single_step(single_step, inst, REGS);
+  void maybe_single_step(bool& single_step, std::uint32_t pc,
+			 std::uint32_t inst, REGS_PARAMS) {
+    check_breakpoints(single_step, pc);
+    if(single_step) this->single_step(single_step, pc, inst, REGS);
   }
 
 public:
