@@ -2,18 +2,22 @@
 #include <stdio.h>
 #include <stdbool.h>
 
+// List of operation names, indexed by opcode.
 static const char * const ops[] = {
   "add", "sub", "and", "or", "xor", "not", "load", "store", "jump", "branch",
   "cmp", "invalid", "beq", "bne", "blt", "bgt", "loadi", "call", "loadi16",
   "loadi16h"
 };
 
+// Returns the operation name for a given opcode.
 static inline const char * op_name(enum opcode opcode) {
   if(opcode > sizeof(ops)/sizeof(char*))
     return "invalid";
   return ops[opcode];
 }
 
+/* Prints textual representations of all the instructions contain within in.
+   See print_inst for the output format. */
 static void disassemble(FILE * in) {
   while(true) {
     uint32_t inst = 0;
