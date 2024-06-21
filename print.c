@@ -2,18 +2,26 @@
 #include <stdio.h>
 #include <stdbool.h>
 
+// List of operation names, indexed by opcode.
 static const char * const ops[] = {
   "add", "sub", "and", "or", "xor", "not", "load", "store", "jump", "branch",
   "cmp", "invalid", "beq", "bne", "blt", "bgt", "loadi", "call", "loadi16",
   "loadi16h"
 };
 
+// Returns the operation name for a given opcode.
 static inline const char * op_name(enum opcode opcode) {
   if(opcode > sizeof(ops)/sizeof(char*))
     return "invalid";
   return ops[opcode];
 }
 
+/* Prints a textual representation of the given instruction, or "invalid" if the
+   instruction is invalid.  The format is "<op> <args>", where <op> is the name
+   of the operation, and <args> is a comma-separated list of arguments.
+   Immediate operands are printed as decimal integers.  Register operands are
+   printed as "r" followed by a decimal register number.  Operands are printed
+   in the reverse of the order they occur in the binary instruction. */
 void print_inst(uint32_t inst, FILE * fp) {
   const enum opcode opcode = inst_opcode(inst);
   const char * const op = op_name(opcode);
