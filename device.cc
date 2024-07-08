@@ -18,6 +18,11 @@ std::array<L3E, 1024> devtab;
 template<typename Entry>
 static void set_devent(NLE<Entry>&, uint32_t, uint32_t, device*);
 
+/* set_devtab maps a device to the region designated by the given base and limit
+   within the given device table.  The device table can be at any level.  base
+   is relative to the base of the table.  The designated region must fall
+   entirely within the range of the table. */
+
 static void set_devtab(std::array<device*, 1024>& tab, uint32_t base,
 		       uint32_t lim, device * dev) {
   const uint32_t si = base >> 2;
@@ -37,16 +42,24 @@ static void set_devtab(std::array<NLE<Entry>, 1024>& tab, uint32_t base,
   const uint32_t ol = lim & mask;
   const bool zero = si == li && os <= ol;
   if(!zero)
+    /* Use large "pages" to cover as much of the designated region as possible.
+     */
     for(long long i = os != 0; i < (long long)li - si + (ol == mask); i++)
       tab[si + i] = dev;
+  // Handle leftover regions not covered by the large "pages."
   if(os != 0) set_devent(tab[si], os, zero ? ol : mask, dev);
   if(ol != mask && (os == 0 || !zero)) set_devent(tab[li], 0, ol, dev);
 }
+
+/* set_devent works like set_devtab, except that it operates on a table
+   entry rather than an entire table. */
 
 template<typename Entry> static void set_devent(NLE<Entry>& ent, uint32_t base,
 						uint32_t lim, device * dev) {
   const auto ptr = std::visit([&](const auto& val) {
     if constexpr(std::is_same_v<decltype(val), device* const&>) {
+      /* If this is a large "page," split it into smaller "pages" before doing
+	 anything else. */
       auto ptr = std::make_unique<std::array<Entry, 1024>>();
       std::fill(ptr->begin(), ptr->end(), val);
       const auto res = ptr.get();
