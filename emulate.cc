@@ -18,10 +18,13 @@
 
 using std::uint32_t;
 
+// Casts val to an unsigned integer of the same size as T.
 template<typename T> static auto make_unsigned(T val) {
   return static_cast<std::make_unsigned_t<T>>(val);
 }
 
+/* Opens the file named by the given filename for reading, returning the file
+   descriptor and the limit. */
 static auto open_ROM(const char * name) {
   int fd;
   if((fd = open(name, O_RDONLY)) == -1) {
@@ -42,6 +45,9 @@ static auto open_ROM(const char * name) {
 }
 
 int main(int argc, char * const * argv) {
+  /* Create a device covering all of memory.  Other devices will later override
+     this within specific subranges, but this will still catch accesses not
+     covered by any other device. */
   new zero_device{0, 0xFFFFFFFF};
   std::optional<uint32_t> stdio_base;
   std::optional<uint32_t> ticks_base;
@@ -114,6 +120,8 @@ int main(int argc, char * const * argv) {
     const auto [fd, limit] = open_ROM(args.second);
     device * const start = get_device(args.first);
     device * const end = get_device(args.first + limit);
+    /* If the ROM is to be loaded into a region backed by a single memory
+       device, shadow it instead of creating a new ROM device. */
     if(start == end && typeid(*start) == typeid(memory)) {
       const auto mem = static_cast<memory*>(start);
       mem->shadow_ROM(args.first - mem->get_base(), fd, limit);
