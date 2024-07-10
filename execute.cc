@@ -1,3 +1,22 @@
+/* Main interpreter loop for the CPU.  For efficiency, there is a separate case
+   for each combination of opcode and register operands.  This is feasible
+   because the opcode and operands are all stored in the upper 15 bits of the
+   instruction.  Since this requires a large quantity of code, macros are used
+   to generate all the cases.  At the end of each case is code to fetch and
+   execute the next instruction; this is more efficient then placing it at the
+   top of a loop.  On compilers that support GNU C, the labels as values
+   extension is used for this code: the address of each case is placed in a
+   large array indexed by the upper 15 bits of the instruction, which is used to
+   find the code for the next instruction.  On compilers that don't support GNU
+   C, a large switch statement with each case consisting of a single goto is
+   used instead.  On GCC at least, this compiles into equally efficient code.
+   However, the use of these switches in this file causes the code to be so
+   large that neither clang nor GCC can compile it in a reasonable amount of
+   time.  Even when the compiler supports GNU C, the code is still very large
+   and expensive to compile; for example, on my machine, GCC takes several
+   minutes and ~9 GiB of memory to compile it with -O3 optimization.  Lower
+   optimization levels can be considerably cheaper. */
+
 #include "cpu.h"
 #include "device.h"
 #include "emulate.h"
@@ -6,6 +25,11 @@
 
 using std::uint32_t;
 using std::uint16_t;
+
+/* The EXHAUST macros execute mac with the first argument set to every possible
+   register index.  The other arguments to mac are taken from the arguments
+   to EXHAUST.  Because macros cannot recurse, we define several identical
+   macros. */
 
 #define EXHAUST0(mac, ...)			\
   mac(0 __VA_OPT__(,) __VA_ARGS__)		\
@@ -66,6 +90,14 @@ using std::uint16_t;
   mac(5 __VA_OPT__(,) __VA_ARGS__)		\
   mac(6 __VA_OPT__(,) __VA_ARGS__)		\
   mac(7 __VA_OPT__(,) __VA_ARGS__)
+
+/* The CASE macro and all macros ending in _CASES work differently depending on
+   whether the compiler supports GNU C.  If the compiler supports GNU C, they
+   generate the appropriate entries in the jump table.  If the compiler does not
+   support GNU C, they generate the appropriate cases in a switch.  The JUMP
+   macro creates the approprite "body" for a case macro.  In the GNU C case,
+   this is the address of a label.  In the non-GNU C case, it is a goto
+   statement. */
 
 #ifdef __GNUC__
 

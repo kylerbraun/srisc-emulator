@@ -16,6 +16,10 @@
 using namespace std::literals::string_view_literals;
 using std::uint32_t;
 
+/* Read a single line of text from cin into buf.  Any characters that don't fit
+   into buf are ignored.  Tabs are ignored.  A backspace causes the previous
+   character to be ignored, erases it from the terminal, and moves the cursor
+   backwards by 1. */
 static std::size_t accept(std::span<char> buf) {
   assert(buf.size() > 0);
   std::size_t read = 0;
@@ -42,13 +46,18 @@ static std::size_t accept(std::span<char> buf) {
   return read;
 }
 
+// Indicates the maximum command line length.
 static constexpr int command_line_length = 512;
 
+// Represents a parseable user command line.
 class command_line {
   const std::array<char, command_line_length> line;
+  // Indicates the beginning and end of each command/argument.
   const std::vector<std::pair<const char*, const char*>> tokens;
 
 public:
+  /* Represents an individual command line argument, convertible to a string
+     view and parseable as an unsigned integer. */
   class argument {
     command_line& parent;
     const int n;
@@ -71,6 +80,7 @@ public:
     friend class command_line;
   };
 
+  // Constructs a parsed command line from the next line available from stream.
   explicit command_line(std::istream& stream)
     : line{[&]() {
       std::array<char, command_line_length> res;
@@ -84,6 +94,7 @@ public:
       std::vector<std::pair<const char*, const char*>> res;
       const auto line_end = std::find(line.cbegin(), line.cend(), 0);
       auto it = line.cbegin();
+      // Store std::isspace in local to allow overload resolution.
       const auto isspace = static_cast<int(*)(int)>(std::isspace);
       while(true) {
 	it = std::find_if_not(it, line_end, isspace);
@@ -107,6 +118,7 @@ public:
   }
 };
 
+// Prints the given unsigned integer in both hexadecimal and decimal.
 static void print_num(uint32_t num) {
   std::cerr << "0x" << std::hex << num
 	    << std::dec << " (" << num << ")\n";
@@ -137,6 +149,8 @@ void CPU::single_step(bool& single_step, uint32_t pc, uint32_t inst,
   while(true) {
     std::cerr << "> ";
     command_line cmdline{std::cin};
+    /* It looks like one of the two following tests might be superfluous, so it
+       might be worth seeing what happens if the first one is removed. */
     if(!cmdline.get_command()) continue;
     const auto mcmd = cmdline.get_command();
     if(!mcmd) continue;
