@@ -1,0 +1,95 @@
+.TH SRISC-EMULATE 1 2024-07-11 srisc
+.SH NAME
+srisc-emulate \- Emulate a SimpleRISC machine.
+.SH SYNOPSIS
+.B srisc-emulate
+[\fIOPTION\fR]...
+.SH DESCRIPTION
+.B srisc-emulate
+is an emulator for the SimpleRISC Instruction Set Architecture (ISA).
+SimpleRISC is an ISA designed using ChatGPT as an experiment to see what sort of
+ISA ChatGPT could design.  (Note that the emulator itself was not written with
+ChatGPT.)  See ISA.txt in the source directory for documentation on the
+instruction set.
+.SH OPTIONS
+.TP
+.BR \-b ", " \-\-breakpoint =\fIADDRESS\fR
+Set a breakpoint at ADDRESS.
+.TP
+.BR \-m ", " \-\-memory =\fISTART_ADDRESS\fR,\fILIMIT\fR
+Map a memory device to the range [START_ADDRESS, START_ADDRESS + LIMIT].
+.TP
+.BR \-r ", " \-\-rom =\fISTART_ADDRESS\fR,\fIPATH\fR
+Map a ROM device containing the bytes in the file named by PATH to the range
+starting at START_ADDRESS.  If the entire range of the ROM device falls within
+the range of a memory device, the ROM is shadowed and no ROM device is created.
+.TP
+.BR \-s ", " \-\-stdio =\fISTART_ADDRESS\fR
+Map the stdio device to the range beginning at START_ADDRESS.  The stdio device
+is a paravirtual device allowing input/output to/from stdin/stdout respectively.
+The stdio device is always 8 bytes in length.  If this option is specified
+multiple times, only the last one is used.
+.TP
+.BR \-t ", " \-\-ticks =\fISTART_ADDRESS\fR
+Map the ticks device to the range beginning at START_ADDRESS.  The ticks device
+is a paravirtual device allowing sufficient access to the host clock to measure
+the duration of events.  The ticks device is always 4 bytes in length.  If this
+option is specified multiple times, only the last one is used.
+.PP
+If a number begins with "0x", it is interpreted as hexadecimal.  Otherwise, if
+a number begins with "0", it is interpreted as octal.  Otherwise, it is
+interpreted as decimal.
+.SH DEBUGGER
+The emulator includes a low-level debugger for emulated code.  Whenever a
+breakpoint is encountered, the debugger is entered.  The debugger repeatedly
+displays a "> " prompt and waits for a command line.  Command arguments are
+separated by spaces.  The available commands are as follows:
+.TP
+.BR b ", " break " " \fIADDRESS\fR
+Set a breakpoint at ADDRESS.
+.TP
+.BR byte ", " hword ", " word " " \fIADDRESS\fR
+Print the byte, half word, or full word at ADDRESS.  The value is printed in
+both hexadecimal and decimal.  Note that \fBhword\fR accesses a full word, but
+only prints the first half.
+.TP
+.BR c ", " continue
+Leave the debugger and continue executing until the next breakpoint.
+.TP
+.BR d ", " delete " " \fIN\fR
+Delete breakpoint N.
+.TP
+.BR n ", " next
+Set a temporary breakpoint at the instruction following this one in memory.
+Then, leave the debugger and continue executing until the next breakpoint.
+.TP
+.BR r0 ", " r1 ", " r2 ", " r3 ", " r4 ", " r5 ", " r6 ", " r7
+Print the contents of the indicated register in both hexadecimal and decimal.
+.TP
+.BR s ", " step
+Execute one instruction, then return to the debugger.
+.SH NOTES
+The start address and size of a memory mapped device should be word-aligned.
+.SH EXAMPLES
+.nf
+.RS
+srisc-emulate --memory=0,0x3FFFF --rom=0,rom \\
+--stdio=0xFFFFFFF8 --ticks=0xFFFFFFF4
+.RE
+.fi
+Emulate a machine with 256 KiB of memory, the rom "rom" shadowed at address 0,
+an stdio device from 0xFFFFFFF8 to 0xFFFFFFFF, and a ticks device from
+0xFFFFFFF4 to 0xFFFFFFF7.
+.PP
+.nf
+.RS
+srisc-emulate
+.RE
+.fi
+Emulate a machine with no devices.  This will just execute zeroes forever.
+.SH BUGS
+When the debugger is first entered after startup or after emulated code has read
+a byte from the stdio device, the next input byte will be interpreted as input
+to the emulated code rather than as input to the debugger.
+.SH SEE ALSO
+srisc-disasm(1)

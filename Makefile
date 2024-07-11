@@ -6,13 +6,13 @@ endif
 CC = $(TARGET_PREFIX)gcc
 CXX = $(TARGET_PREFIX)g++
 
-all: disasm emulate
+all: srisc-disasm srisc-emulate
 
-emulate: emulate.o cpu.o execute.o device.o print.o
-	$(CXX) emulate.o cpu.o execute.o device.o print.o -o emulate
+srisc-emulate: emulate.o cpu.o execute.o device.o print.o
+	$(CXX) emulate.o cpu.o execute.o device.o print.o -o srisc-emulate
 
-disasm: disasm.o print.o
-	$(CC) disasm.o print.o -o disasm
+srisc-disasm: disasm.o print.o
+	$(CC) disasm.o print.o -o srisc-disasm
 
 print.o: print.c emulate.h
 	$(CC) $(CFLAGS) -c -Wall -Wextra -std=c11 print.c -o print.o

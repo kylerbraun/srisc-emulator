@@ -1,0 +1,106 @@
+1. Registers
+
+The machine has 8 general purpose registers, r0 - r7.  There is also a program
+counter register, pc, and a flags register, containing the flags Z, N, and cmp.
+All registers are initially set to zero, and all flags are initially set to
+false.
+
+2. Instruction Format
+
+The format of most instructions is the following:
+
+ 0        16 17 19 20 22 23 25 26    31
++--------------------------------------+
+| Immediate | Rs2 | Rs1 | Rd  | Opcode |
++--------------------------------------+
+           17     3     3     3        6
+
+The numbers on the top are the start and end bits of each field.  The numbers on
+the bottom are the size of each field.  Most instructions don't use all of the
+fields.  Fields unused by an instruction must be cleared to zero.  For jump
+instructions, the immediate value encodes a relative offset from the next
+instruction.
+
+The format of the LOADI and CALL instructions is the following:
+
+ 0        22 23 25 26    31
++--------------------------+
+| Immediate | Rd  | Opcode |
++--------------------------+
+           23     3        6
+
+3. Instructions
+
+Note: All arithmetic is two's complement.  Byte order is little endian.
+
+Opcode	Assembly		Description
+0	ADD Rd, Rs1, Rs2	Add the contents of Rs2 to the contents of Rs1,
+				and store the result in Rd.
+
+1	SUB Rd, Rs1, Rs2	Subtract the contents of Rs2 from the contents
+				of Rs1, and store the result in Rd.
+
+2	AND Rd, Rs1, Rs2	Calculate the bitwise and of the contents of Rs1
+				with the contents of Rs2, and store the result
+				in Rd.
+
+3	OR Rd, Rs1, Rs2		Calculate the bitwise or of the contents of Rs1
+				with the contents of Rs2, and store the result
+				in Rd.
+
+4	XOR Rd, Rs1, Rs2	Calculate the bitwise xor of the contents of Rs1
+				with the contents of Rs2, and store the result
+				in Rd.
+
+5	NOT Rd			Calculate the bitwise not of the contents of Rd
+				and store the result in Rd.
+
+6	LOAD Rd, Rs2, Imm	Load the contents of the possibly unaligned
+				memory word beginning at address Rs2 + Imm into
+				Rd.  The immediate value is signed.
+
+7	STORE Rd, Rs2, Imm	Store the contents of Rd to the possibly
+				unaligned memory word beginning at address Rs2 +
+				Imm.  The immediate value is signed.
+
+8	JUMP Rel		Jump to the address at the relative offset.
+
+9	BRANCH Rs2, Rel		If the contents of Rs2 are 0, jump to the
+				address at the relative offset.
+
+10	CMP Rs1, Rs2		Set the Z flag to true if the contents of Rs1
+				are equal to the contents of Rs2, and set the Z
+				flag to false otherwise.  Set the N flag to true
+				if the signed contents of Rs1 are less than the
+				signed contents of Rs2, and set N to false
+				otherwise.  In any case, set the cmp flag to
+				true.
+
+12	BEQ Rs2, Rel		If both the cmp and Z flags are set, or if the
+				cmp flag is unset and Rs2 is zero, jump to the
+				address at the relative offset.
+
+13	BNE Rs2, Rel		If the cmp flag is set and the Z flags is unset,
+				or if the cmp flag is unset and Rs2 is not zero,
+				jump to the address at the relative offset.
+
+14	BLT Rs2, Rel		If both the cmp and N flags are set, or if the
+				cmp flag is unset and Rs2 is negative, jump to
+				the address at the relative offset.
+
+15	BGT Rs2, Rel		If the cmp flag is set, the N flag is unset and
+				the Z flag is unset, or if the cmp flag is unset
+				and Rs2 is positive, jump to the address at the
+				relative offset.
+
+16	LOADI Rd, Imm		Load the sign-extended immediate value into Rd.
+
+17	CALL Rd	  		Jump to the absolute address stored in Rd.  Note
+				that, despite what the name might suggest, this
+				instruction does not store a return address.
+
+18	LOADI16 Rd, Imm		Load Imm into the lower 16 bits of Rd.  Bit 16
+				of Imm must be unset.
+
+19	LOADI16H Rd, Imm	Load Imm into the upper 16 bits of Rd.  Bit 16
+				of Imm must be unset.

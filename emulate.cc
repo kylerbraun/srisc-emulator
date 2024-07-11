@@ -90,7 +90,7 @@ int main(int argc, char * const * argv) {
     return std::pair{value, comma + 1};
   };
   std::vector<std::pair<uint32_t, const char*>> memories, ROMs;
-  while((c = getopt_long(argc, argv, "s:m:r:b:", opts, &longindex)) != -1) {
+  while((c = getopt_long(argc, argv, "s:m:r:b:t:", opts, &longindex)) != -1) {
     switch(c) {
     case 's':
       stdio_base = parse_number1(optarg);
